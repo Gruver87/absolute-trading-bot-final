@@ -1,5 +1,5 @@
-п»ї# -*- coding: utf-8 -*-
-# ULTIMATE_BOT_FIXED.py - РџР РћР¤Р•РЎРЎРРћРќРђР›Р¬РќРђРЇ Р’Р•Р РЎРРЇ
+# -*- coding: utf-8 -*-
+# ULTIMATE_BOT_FIXED.py - ПРОФЕССИОНАЛЬНАЯ ВЕРСИЯ
 
 import time
 import requests
@@ -13,7 +13,7 @@ from datetime import datetime
 from flask import Flask, jsonify, render_template_string, request
 
 # ============================================================
-# РћРўРљР›Р®Р§РђР•Рњ РЎРўРђРќР”РђР РўРќР«Р• Р›РћР“Р FLASK
+# ОТКЛЮЧАЕМ СТАНДАРТНЫЕ ЛОГИ FLASK
 # ============================================================
 log = logging.getLogger('werkzeug')
 log.setLevel(logging.ERROR)
@@ -22,12 +22,12 @@ if cli:
     cli.show_server_banner = lambda *args: None
 
 # ============================================================
-# РљРћРќР¤РР“РЈР РђР¦РРЇ
+# КОНФИГУРАЦИЯ
 # ============================================================
 
 MEXC_API_KEY = "mx0vgl2Uso9d3LN60x"
 MEXC_API_SECRET = "72fd7dba156a40bb8adf6e54709b7bd8"
-TELEGRAM_TOKEN = "8763522091:AAFHaXyVXrXqBM8Wyssun9VpgAU6BGttJAI"
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = "1021048982"
 
 COINS = [
@@ -59,7 +59,7 @@ auto_pilot = True
 running = True
 
 # ============================================================
-# Р’РЎРџРћРњРћР“РђРўР•Р›Р¬РќР«Р• Р¤РЈРќРљР¦РР
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # ============================================================
 
 def sign(p):
@@ -222,7 +222,7 @@ def auto_trade():
             "quantity": qty, "entry_time": time.time(),
             "peak_price": best_price, "peak_profit": 0, "confidence": best_conf
         })
-        add_log(f"рџџў РџРћРљРЈРџРљРђ {best_sym}: ${actual:.2f}")
+        add_log(f"?? ПОКУПКА {best_sym}: ${actual:.2f}")
 
 def check_sell():
     global balance, positions
@@ -239,27 +239,27 @@ def check_sell():
             if market_sell(pos["symbol"], pos["quantity"]):
                 profit_usd = pos["invested"] * profit / 100
                 balance += pos["invested"] + profit_usd
-                add_log(f"рџЋЇ РўР Р•Р™Р›РРќР“-РЎРўРћРџ {pos['symbol']}: {profit:+.2f}%")
-                add_history(pos["symbol"], "РўР Р•Р™Р›РРќР“-РЎРўРћРџ", price, pos["invested"], profit_usd)
+                add_log(f"?? ТРЕЙЛИНГ-СТОП {pos['symbol']}: {profit:+.2f}%")
+                add_history(pos["symbol"], "ТРЕЙЛИНГ-СТОП", price, pos["invested"], profit_usd)
                 to_remove.append(pos)
         elif profit >= TAKE_PROFIT:
             if market_sell(pos["symbol"], pos["quantity"]):
                 profit_usd = pos["invested"] * profit / 100
                 balance += pos["invested"] + profit_usd
-                add_log(f"рџЋ‰ РўР•Р™Рљ-РџР РћР¤РРў {pos['symbol']}: {profit:+.2f}%")
-                add_history(pos["symbol"], "РўР•Р™Рљ-РџР РћР¤РРў", price, pos["invested"], profit_usd)
+                add_log(f"?? ТЕЙК-ПРОФИТ {pos['symbol']}: {profit:+.2f}%")
+                add_history(pos["symbol"], "ТЕЙК-ПРОФИТ", price, pos["invested"], profit_usd)
                 to_remove.append(pos)
         elif profit <= -STOP_LOSS:
             if market_sell(pos["symbol"], pos["quantity"]):
                 profit_usd = pos["invested"] * profit / 100
                 balance += pos["invested"] + profit_usd
-                add_log(f"рџ›‘ РЎРўРћРџ-Р›РћРЎРЎ {pos['symbol']}: {profit:+.2f}%")
-                add_history(pos["symbol"], "РЎРўРћРџ-Р›РћРЎРЎ", price, pos["invested"], profit_usd)
+                add_log(f"?? СТОП-ЛОСС {pos['symbol']}: {profit:+.2f}%")
+                add_history(pos["symbol"], "СТОП-ЛОСС", price, pos["invested"], profit_usd)
                 to_remove.append(pos)
     for pos in to_remove: positions.remove(pos)
 
 # ============================================================
-# Р’Р•Р‘-РРќРўР•Р Р¤Р•Р™РЎ
+# ВЕБ-ИНТЕРФЕЙС
 # ============================================================
 
 app = Flask(__name__)
@@ -281,43 +281,43 @@ th{color:#0f0;border-bottom:2px solid #0f0}
 .log-panel{background:#000;height:200px;overflow:auto;font-size:11px;padding:10px}
 </style></head>
 <body>
-<h1>рџ¤– ULTIMATE TRADING BOT</h1>
-<p>рџ”ђ DABRANSKI ULADZIMIR PETROVICH | 14.07.1987 | GRODNO</p>
+<h1>?? ULTIMATE TRADING BOT</h1>
+<p>?? DABRANSKI ULADZIMIR PETROVICH | 14.07.1987 | GRODNO</p>
 <div class="card">
     <div class="big-number" id="balance">$0</div>
-    <div class="stat"><span>РђРІС‚РѕРїРёР»РѕС‚:</span><span id="autopilot">Р’РљР›</span></div>
-    <div class="stat"><span>РџРѕР·РёС†РёР№:</span><span id="pos_count">0</span></div>
-    <button class="btn" onclick="fetch('/cmd/auto')">рџ¤– РђР’РўРћРџРР›РћРў</button>
-    <button class="btn btn-danger" onclick="fetch('/cmd/close')">рџ”’ Р—РђРљР Р«РўР¬ Р’РЎРЃ</button>
-    <button class="btn" onclick="showBuy()">рџџў РљРЈРџРРўР¬</button>
-    <button class="btn" onclick="showSell()">рџ”ґ РџР РћР”РђРўР¬</button>
+    <div class="stat"><span>Автопилот:</span><span id="autopilot">ВКЛ</span></div>
+    <div class="stat"><span>Позиций:</span><span id="pos_count">0</span></div>
+    <button class="btn" onclick="fetch('/cmd/auto')">?? АВТОПИЛОТ</button>
+    <button class="btn btn-danger" onclick="fetch('/cmd/close')">?? ЗАКРЫТЬ ВСЁ</button>
+    <button class="btn" onclick="showBuy()">?? КУПИТЬ</button>
+    <button class="btn" onclick="showSell()">?? ПРОДАТЬ</button>
 </div>
-<div class="card"><h3>рџЋЇ РЎРР“РќРђР›Р« BUY</h3><div id="signals">Р—Р°РіСЂСѓР·РєР°...</div></div>
-<div class="card"><h3>рџ“Љ РџРћР—РР¦РР</h3><div id="positions">РќРµС‚</div></div>
-<div class="card"><h3>рџ“‹ РРЎРўРћР РРЇ</h3><div id="history">РќРµС‚</div></div>
-<div class="card"><h3>рџ“‹ Р›РћР“Р</h3><div id="logs" class="log-panel">Р—Р°РіСЂСѓР·РєР°...</div></div>
+<div class="card"><h3>?? СИГНАЛЫ BUY</h3><div id="signals">Загрузка...</div></div>
+<div class="card"><h3>?? ПОЗИЦИИ</h3><div id="positions">Нет</div></div>
+<div class="card"><h3>?? ИСТОРИЯ</h3><div id="history">Нет</div></div>
+<div class="card"><h3>?? ЛОГИ</h3><div id="logs" class="log-panel">Загрузка...</div></div>
 <script>
-function showBuy(){let c=prompt("РњРѕРЅРµС‚Р°:","XTZUSDT"); if(c){let a=prompt("РЎСѓРјРјР°:","10"); if(a) fetch(`/cmd/buy?symbol=${c}&amount=${a}`);}}
-function showSell(){let c=prompt("РњРѕРЅРµС‚Р°:",""); if(c) fetch(`/cmd/sell?symbol=${c}`);}
+function showBuy(){let c=prompt("Монета:","XTZUSDT"); if(c){let a=prompt("Сумма:","10"); if(a) fetch(`/cmd/buy?symbol=${c}&amount=${a}`);}}
+function showSell(){let c=prompt("Монета:",""); if(c) fetch(`/cmd/sell?symbol=${c}`);}
 function update(){
     fetch('/data').then(r=>r.json()).then(d=>{
         document.getElementById('balance').innerHTML='$'+d.balance;
-        document.getElementById('autopilot').innerHTML=d.auto_pilot?'вњ… Р’РљР›':'вќЊ Р’Р«РљР›';
+        document.getElementById('autopilot').innerHTML=d.auto_pilot?'? ВКЛ':'? ВЫКЛ';
         document.getElementById('pos_count').innerHTML=d.positions.length;
-        let s='<table><thead><tr><th>РњРѕРЅРµС‚Р°</th><th>РЎРёРіРЅР°Р»</th><th>%</th><th>RSI</th><th>Р¦РµРЅР°</th></tr></thead><tbody>';
+        let s='<table><thead><tr><th>Монета</th><th>Сигнал</th><th>%</th><th>RSI</th><th>Цена</th></tr></thead><tbody>';
         for(let sig of d.buy_signals.slice(0,30)){
             s+=`<tr><td><b>${sig.symbol}</b></td><td class="signal-buy">BUY</td><td>${sig.confidence}%</td><td>${sig.rsi}</td><td>$${sig.price}</td></tr>`;
         }
         s+='</tbody></table>';
         document.getElementById('signals').innerHTML=s;
-        let p='<tr><thead><tr><th>РњРѕРЅРµС‚Р°</th><th>РџСЂРёР±С‹Р»СЊ</th><th>Р’Р»РѕР¶РµРЅРѕ</th></tr></thead><tbody>';
+        let p='<tr><thead><tr><th>Монета</th><th>Прибыль</th><th>Вложено</th></tr></thead><tbody>';
         for(let pos of d.positions){
             let cls = pos.profit>=0 ? 'profit' : 'loss';
             p+=`<tr><td>${pos.symbol}</td><td class="${cls}">${pos.profit.toFixed(2)}%</td><td>$${pos.invested}</td></tr>`;
         }
         p+='</tbody></table>';
         document.getElementById('positions').innerHTML=p;
-        let h='<tr><thead><tr><th>Р’СЂРµРјСЏ</th><th>РњРѕРЅРµС‚Р°</th><th>РўРёРї</th><th>РџСЂРёР±С‹Р»СЊ</th></tr></thead><tbody>';
+        let h='<tr><thead><tr><th>Время</th><th>Монета</th><th>Тип</th><th>Прибыль</th></tr></thead><tbody>';
         for(let hist of d.history.slice(0,20)){
             let cls = hist.profit>=0 ? 'profit' : 'loss';
             h+=`<tr><td>${hist.time}</td><td>${hist.symbol}</td><td>${hist.side}</td><td class="${cls}">${hist.profit>0?'+':''}${hist.profit}</td></tr>`;
@@ -354,7 +354,7 @@ def data():
     })
 
 @app.route('/cmd/auto')
-def cmd_auto(): global auto_pilot; auto_pilot=not auto_pilot; add_log(f"рџ¤– РђРІС‚РѕРїРёР»РѕС‚: {'Р’РљР›' if auto_pilot else 'Р’Р«РљР›'}"); return "ok"
+def cmd_auto(): global auto_pilot; auto_pilot=not auto_pilot; add_log(f"?? Автопилот: {'ВКЛ' if auto_pilot else 'ВЫКЛ'}"); return "ok"
 
 @app.route('/cmd/close')
 def cmd_close(): 
@@ -363,7 +363,7 @@ def cmd_close():
         if market_sell(p["symbol"], p["quantity"]):
             balance += p["invested"]
     positions.clear()
-    add_log("рџ”’ Р’СЃРµ РїРѕР·РёС†РёРё Р·Р°РєСЂС‹С‚С‹")
+    add_log("?? Все позиции закрыты")
     return "ok"
 
 @app.route('/cmd/buy')
@@ -382,7 +382,7 @@ def cmd_buy():
         if market_buy(sym, actual):
             balance -= actual
             positions.append({"symbol":sym,"entry_price":price,"invested":actual,"quantity":qty,"entry_time":time.time(),"peak_price":price,"peak_profit":0})
-            add_log(f"рџџў Р РЈР§РќРђРЇ РџРћРљРЈРџРљРђ {sym}: ${actual:.2f}")
+            add_log(f"?? РУЧНАЯ ПОКУПКА {sym}: ${actual:.2f}")
     return "ok"
 
 @app.route('/cmd/sell')
@@ -393,80 +393,80 @@ def cmd_sell():
             global balance
             balance += p["invested"]
             positions.remove(p)
-            add_log(f"рџ”ґ Р РЈР§РќРђРЇ РџР РћР”РђР–Рђ {sym}")
+            add_log(f"?? РУЧНАЯ ПРОДАЖА {sym}")
             break
     return "ok"
 
 # ============================================================
-# РљР РђРЎРР’Р«Р™ РљРћРќРЎРћР›Р¬РќР«Р™ Р”РђРЁР‘РћР Р”
+# КРАСИВЫЙ КОНСОЛЬНЫЙ ДАШБОРД
 # ============================================================
 
 def print_console_dashboard():
     os.system('cls' if os.name == 'nt' else 'clear')
     
-    # РЁР°РїРєР°
-    print("\n" + "в–€" * 80)
-    print("в–€   рџ¤– ABSOLUTE ULTIMATE TRADING BOT")
-    print("в–€   рџ”ђ DABRANSKI ULADZIMIR PETROVICH | 14.07.1987 | GRODNO")
-    print("в–€" * 80)
+    # Шапка
+    print("\n" + "-" * 80)
+    print("-   ?? ABSOLUTE ULTIMATE TRADING BOT")
+    print("-   ?? DABRANSKI ULADZIMIR PETROVICH | 14.07.1987 | GRODNO")
+    print("-" * 80)
     
-    # РћСЃРЅРѕРІРЅР°СЏ СЃС‚Р°С‚РёСЃС‚РёРєР°
+    # Основная статистика
     win_rate = (len([h for h in history if h["profit"] > 0]) / max(len(history), 1)) * 100
-    print(f"\n   рџ“… {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"   рџ’° Р‘РђР›РђРќРЎ: ${balance:.2f}")
-    print(f"   рџ¤– РђР’РўРћРџРР›РћРў: {'вњ… Р’РљР›Р®Р§РЃРќ' if auto_pilot else 'вќЊ Р’Р«РљР›Р®Р§Р•Рќ'}")
-    print(f"   рџ“Љ РџРћР—РР¦РР™: {len(positions)}/{MAX_POSITIONS}")
-    print(f"   рџЏ† Р’РЎР•Р“Рћ РЎР”Р•Р›РћРљ: {len(history)} | Р’РРќР Р•Р™Рў: {win_rate:.0f}%")
-    print(f"   рџЊђ Р’Р•Р‘-РРќРўР•Р Р¤Р•Р™РЎ: http://localhost:5002")
+    print(f"\n   ?? {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"   ?? БАЛАНС: ${balance:.2f}")
+    print(f"   ?? АВТОПИЛОТ: {'? ВКЛЮЧЁН' if auto_pilot else '? ВЫКЛЮЧЕН'}")
+    print(f"   ?? ПОЗИЦИЙ: {len(positions)}/{MAX_POSITIONS}")
+    print(f"   ?? ВСЕГО СДЕЛОК: {len(history)} | ВИНРЕЙТ: {win_rate:.0f}%")
+    print(f"   ?? ВЕБ-ИНТЕРФЕЙС: http://localhost:5002")
     
-    # Р›СѓС‡С€РёРµ СЃРёРіРЅР°Р»С‹ РЅР° РїРѕРєСѓРїРєСѓ
+    # Лучшие сигналы на покупку
     buy_list = [(sym, data) for sym, data in signals.items() if data["signal"] == "BUY"]
     buy_list.sort(key=lambda x: x[1]["confidence"], reverse=True)
     
     if buy_list:
-        print(f"\n   рџџў РўРћРџ-10 РЎРР“РќРђР›РћР’ РќРђ РџРћРљРЈРџРљРЈ:")
-        print(f"   {'в”Ђ' * 78}")
-        print(f"   {'РњРѕРЅРµС‚Р°':<12} {'РЎРёРіРЅР°Р»':<8} {'РЈРІРµСЂРµРЅРЅРѕСЃС‚СЊ':<12} {'RSI':<8} {'Р¦РµРЅР°':<12}")
-        print(f"   {'в”Ђ' * 78}")
+        print(f"\n   ?? ТОП-10 СИГНАЛОВ НА ПОКУПКУ:")
+        print(f"   {'-' * 78}")
+        print(f"   {'Монета':<12} {'Сигнал':<8} {'Уверенность':<12} {'RSI':<8} {'Цена':<12}")
+        print(f"   {'-' * 78}")
         for sym, data in buy_list[:10]:
-            print(f"   {sym:<12} рџ“€ {data['signal']:<5} {data['confidence']:>5.0f}%      {data['rsi']:>5.0f}     ${data['price']:>10.2f}")
+            print(f"   {sym:<12} ?? {data['signal']:<5} {data['confidence']:>5.0f}%      {data['rsi']:>5.0f}     ${data['price']:>10.2f}")
     
-    # РћС‚РєСЂС‹С‚С‹Рµ РїРѕР·РёС†РёРё
+    # Открытые позиции
     if positions:
-        print(f"\n   рџ“Љ РћРўРљР Р«РўР«Р• РџРћР—РР¦РР:")
-        print(f"   {'в”Ђ' * 78}")
-        print(f"   {'РњРѕРЅРµС‚Р°':<12} {'РўРёРї':<8} {'Р’С…РѕРґ':<12} {'РўРµРєСѓС‰Р°СЏ':<12} {'РџСЂРёР±С‹Р»СЊ':<12} {'Р’Р»РѕР¶РµРЅРѕ':<12}")
-        print(f"   {'в”Ђ' * 78}")
+        print(f"\n   ?? ОТКРЫТЫЕ ПОЗИЦИИ:")
+        print(f"   {'-' * 78}")
+        print(f"   {'Монета':<12} {'Тип':<8} {'Вход':<12} {'Текущая':<12} {'Прибыль':<12} {'Вложено':<12}")
+        print(f"   {'-' * 78}")
         for pos in positions:
             cur = get_price(pos["symbol"])
             profit = (cur - pos["entry_price"]) / pos["entry_price"] * 100 if cur > 0 else 0
-            profit_color = "рџџў" if profit > 0 else "рџ”ґ" if profit < 0 else "вљЄ"
+            profit_color = "??" if profit > 0 else "??" if profit < 0 else "?"
             print(f"   {pos['symbol']:<12} {profit_color}       ${pos['entry_price']:>8.4f}  ${cur:>8.4f}  {profit:>+6.2f}%     ${pos['invested']:>8.2f}")
     
-    # РџРѕСЃР»РµРґРЅРёРµ С‚СЂР°РЅР·Р°РєС†РёРё
+    # Последние транзакции
     if history:
-        print(f"\n   рџ“‹ РџРћРЎР›Р•Р”РќРР• РўР РђРќР—РђРљР¦РР:")
-        print(f"   {'в”Ђ' * 78}")
-        print(f"   {'Р’СЂРµРјСЏ':<12} {'РњРѕРЅРµС‚Р°':<12} {'РўРёРї':<16} {'РџСЂРёР±С‹Р»СЊ':<12}")
-        print(f"   {'в”Ђ' * 78}")
+        print(f"\n   ?? ПОСЛЕДНИЕ ТРАНЗАКЦИИ:")
+        print(f"   {'-' * 78}")
+        print(f"   {'Время':<12} {'Монета':<12} {'Тип':<16} {'Прибыль':<12}")
+        print(f"   {'-' * 78}")
         for h in history[:5]:
-            profit_symbol = "рџ“€ +" if h["profit"] > 0 else "рџ“‰ " if h["profit"] < 0 else "вљЄ "
+            profit_symbol = "?? +" if h["profit"] > 0 else "?? " if h["profit"] < 0 else "? "
             print(f"   {h['time']:<12} {h['symbol']:<12} {h['side']:<16} {profit_symbol}{h['profit']:>6.2f}$")
     
-    # РџРѕСЃР»РµРґРЅРёРµ Р»РѕРіРё
+    # Последние логи
     if logs:
-        print(f"\n   рџ“Ў РџРћРЎР›Р•Р”РќРР• РЎРћР‘Р«РўРРЇ:")
-        print(f"   {'в”Ђ' * 78}")
+        print(f"\n   ?? ПОСЛЕДНИЕ СОБЫТИЯ:")
+        print(f"   {'-' * 78}")
         for log_entry in logs[:5]:
             print(f"   [{log_entry['time']}] {log_entry['msg']}")
     
-    # РљРѕРјР°РЅРґС‹
-    print(f"\n   {'в”Ђ' * 78}")
-    print(f"   рџЋ® РљРћРњРђРќР”Р«: [A] РђРІС‚РѕРїРёР»РѕС‚  [C] Р—Р°РєСЂС‹С‚СЊ РІСЃС‘  [S] РЎС‚Р°С‚СѓСЃ  [T] Telegram  [Q] Р’С‹С…РѕРґ")
-    print(f"   {'в”Ђ' * 78}\n")
+    # Команды
+    print(f"\n   {'-' * 78}")
+    print(f"   ?? КОМАНДЫ: [A] Автопилот  [C] Закрыть всё  [S] Статус  [T] Telegram  [Q] Выход")
+    print(f"   {'-' * 78}\n")
 
 # ============================================================
-# РљРћРќРЎРћР›Р¬РќР«Р™ РћР‘Р РђР‘РћРўР§РРљ РљРћРњРђРќР”
+# КОНСОЛЬНЫЙ ОБРАБОТЧИК КОМАНД
 # ============================================================
 
 def console_handler():
@@ -477,28 +477,28 @@ def console_handler():
                 cmd = sys.stdin.read(1).lower()
                 if cmd == 'a':
                     auto_pilot = not auto_pilot
-                    add_log(f"рџ¤– РђРІС‚РѕРїРёР»РѕС‚: {'Р’РљР›' if auto_pilot else 'Р’Р«РљР›'}")
+                    add_log(f"?? Автопилот: {'ВКЛ' if auto_pilot else 'ВЫКЛ'}")
                 elif cmd == 'c':
                     for p in positions[:]:
                         market_sell(p["symbol"], p["quantity"])
                         balance += p["invested"]
                     positions.clear()
-                    add_log("рџ”’ Р’СЃРµ РїРѕР·РёС†РёРё Р·Р°РєСЂС‹С‚С‹")
+                    add_log("?? Все позиции закрыты")
                 elif cmd == 's':
-                    add_log(f"рџ“Љ Р‘Р°Р»Р°РЅСЃ: ${balance:.2f}, РџРѕР·РёС†РёР№: {len(positions)}")
+                    add_log(f"?? Баланс: ${balance:.2f}, Позиций: {len(positions)}")
                 elif cmd == 't':
-                    send_telegram(f"рџ¤– Р‘РћРў РђРљРўРР’Р•Рќ\nР‘Р°Р»Р°РЅСЃ: ${balance:.2f}")
-                    add_log("рџ“± Telegram РѕС‚РїСЂР°РІР»РµРЅ")
+                    send_telegram(f"?? БОТ АКТИВЕН\nБаланс: ${balance:.2f}")
+                    add_log("?? Telegram отправлен")
                 elif cmd == 'q':
                     running = False
-                    add_log("рџ›‘ Р‘РѕС‚ РѕСЃС‚Р°РЅРѕРІР»РµРЅ")
+                    add_log("?? Бот остановлен")
                     break
         except:
             pass
         time.sleep(0.1)
 
 # ============================================================
-# РћРЎРќРћР’РќРћР™ Р¦РРљР›
+# ОСНОВНОЙ ЦИКЛ
 # ============================================================
 
 def main():
@@ -509,11 +509,11 @@ def main():
     balance = get_balance()
     
     print("="*60)
-    print("   рџ¤– ULTIMATE TRADING BOT Р—РђРџРЈР©Р•Рќ")
-    print(f"   Р‘Р°Р»Р°РЅСЃ: ${balance:.2f}")
-    print(f"   РњРѕРЅРµС‚: {len(COINS)}")
-    print("   Р’РµР±: http://localhost:5002")
-    print("   рџЋ® РљРћРњРђРќР”Р«: A - РђРІС‚РѕРїРёР»РѕС‚ | C - Р—Р°РєСЂС‹С‚СЊ РІСЃС‘ | S - РЎС‚Р°С‚СѓСЃ | T - Telegram | Q - Р’С‹С…РѕРґ")
+    print("   ?? ULTIMATE TRADING BOT ЗАПУЩЕН")
+    print(f"   Баланс: ${balance:.2f}")
+    print(f"   Монет: {len(COINS)}")
+    print("   Веб: http://localhost:5002")
+    print("   ?? КОМАНДЫ: A - Автопилот | C - Закрыть всё | S - Статус | T - Telegram | Q - Выход")
     print("="*60)
     
     last = 0
@@ -535,7 +535,7 @@ def main():
             running = False
             break
         except Exception as e: 
-            add_log(f"РћС€РёР±РєР°: {e}")
+            add_log(f"Ошибка: {e}")
             time.sleep(5)
 
 if __name__ == "__main__":
