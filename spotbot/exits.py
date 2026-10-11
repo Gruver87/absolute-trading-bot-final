@@ -1,0 +1,32 @@
+"""Stop, take-profit, and trailing gap. Same percents as the old spot loop.
+
+3.5% stop, 7% take-profit, trail arms at +3% and sells after a 2% giveback.
+"""
+
+from __future__ import annotations
+
+
+def pnl_bps(entry: int, price: int) -> int:
+    if entry <= 0 or price <= 0:
+        raise ValueError("entry and price must be positive")
+    return (price - entry) * 10_000 // entry
+
+
+def exit_reason(
+    entry: int,
+    price: int,
+    peak: int,
+    stop_bps: int,
+    take_bps: int,
+    trail_arm_bps: int,
+    trail_gap_bps: int,
+) -> str | None:
+    profit = pnl_bps(entry, price)
+    peak_profit = pnl_bps(entry, max(peak, price))
+    if peak_profit >= trail_arm_bps and peak_profit - profit >= trail_gap_bps:
+        return "trail"
+    if profit >= take_bps:
+        return "take_profit"
+    if profit <= -stop_bps:
+        return "stop"
+    return None

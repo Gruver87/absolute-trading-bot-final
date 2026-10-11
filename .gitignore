@@ -32,3 +32,8 @@ Thumbs.db
 # Временные файлы
 *.tmp
 *.bak
+
+# Спот-бот: локальный счёт и сборка Rust
+data/
+.venv/
+native/target/
