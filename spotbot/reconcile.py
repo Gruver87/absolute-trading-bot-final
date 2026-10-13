@@ -15,13 +15,17 @@ def inventory_mismatch(
     other sleeves. Their coins are part of the expected total.
     """
     held: dict[str, int] = {}
+    seen: set[str] = set()
     for symbol, atoms in [*positions, *(elsewhere or [])]:
+        if symbol in seen:
+            return f"{symbol} is listed twice"
+        seen.add(symbol)
         if atoms < 0:
             return f"{symbol} base is negative"
         if not symbol.endswith("USDT") or len(symbol) <= 4:
             return f"{symbol} is not a USDT pair"
         asset = symbol[: -4]
-        held[asset] = held.get(asset, 0) + atoms
+        held[asset] = atoms
     for asset, need in held.items():
         have = bases_atoms.get(asset, 0)
         if have != need:
@@ -51,9 +55,13 @@ def order_missing(message: str) -> bool:
     return "not exist" in text or "-2013" in text or "unknown order" in text
 
 
-def pending_gone(misses: int, applied_atoms: int, has_fill: bool) -> bool:
-    """Clear a client id only after repeated absences and no recorded fill."""
-    return misses >= 3 and applied_atoms == 0 and not has_fill
+def pending_gone(misses: int, applied_atoms: int, has_fill: bool, acked: bool = False) -> bool:
+    """Clear a client id only after repeated absences, with no fill and no ack.
+
+    An exchange order id already on the book means the order was accepted.
+    "Order does not exist" does not erase that.
+    """
+    return misses >= 3 and applied_atoms == 0 and not has_fill and not acked
 
 
 def fills_match(traded_base: int, traded_quote: int, order_base: int, order_quote: int) -> bool:
@@ -104,7 +112,7 @@ def split_commission(
         raise FeeAssetError("commission needs an order, a base asset, and a side")
     if not order_id.isdigit() or len(order_id) > 32:
         raise FeeAssetError("trade order id is not digits")
-    from spotbot.money import BASE_ATOMS, MICRO, MoneyError, parse_micro, parse_micro_nonneg, to_satoshi
+    from spotbot.money import BASE_ATOMS, MICRO, MoneyError, notional_micro, parse_micro, parse_micro_nonneg, parse_price, to_satoshi
 
     want_buyer = side == "BUY"
     usdt = 0
@@ -118,7 +126,7 @@ def split_commission(
             continue
         seen = True
         got_symbol = str(row.get("symbol") or "")
-        if got_symbol and got_symbol != f"{base_asset}USDT":
+        if got_symbol != f"{base_asset}USDT":
             raise FeeAssetError("trade symbol is not the order symbol")
         trade_id = str(row.get("id") or "")
         if not trade_id.isdigit() or len(trade_id) > 32:
@@ -143,12 +151,12 @@ def split_commission(
         if price_raw in (None, ""):
             raise FeeAssetError("trade row has no price")
         try:
-            row_price = parse_micro(str(price_raw))
+            row_price = parse_price(str(price_raw))
         except MoneyError as exc:
             raise FeeAssetError("trade price is not decimal") from exc
         if row_price <= 0:
             raise FeeAssetError("trade price is zero")
-        priced = row_price * row_base // BASE_ATOMS
+        priced = notional_micro(row_base, row_price)
         if abs(priced - row_quote) > 1:
             raise FeeAssetError("trade price does not match qty")
         traded_base += row_base

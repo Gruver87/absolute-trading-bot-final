@@ -8,9 +8,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from spotbot.exits import exit_reason
-from spotbot.fees import paper_buy, paper_sell
+from spotbot.fees import paper_sell
 from spotbot.liquidity import candle_lift
-from spotbot.sanity import price_ok
+from spotbot.money import notional_micro
+from spotbot.rules import budget_micro, plan_paper_buy
+from spotbot.sanity import mark_ok, price_ok, slip_price
 from spotbot.signals import entry_signal
 
 
@@ -29,6 +31,8 @@ class ReplayResult:
     fees_micro: int
     ended_open: bool
     fills: tuple[Fill, ...]
+    open_micro: int = 0
+    open_known: bool = True
 
 
 def holdout_cut(count: int) -> int:
@@ -55,10 +59,14 @@ def replay_closes(
     trail_arm_bps: int,
     trail_gap_bps: int,
     min_notional_micro: int,
+    base_step_atoms: int = 1,
+    slip_bps: int = 0,
 ) -> ReplayResult:
+    if not closes or closes[0] <= 0 or base_step_atoms <= 0:
+        return ReplayResult(0, 0, 0, 0, False, ())
     clean = [closes[0]]
     for price in closes[1:]:
-        if price_ok(clean[-1], price):
+        if price > 0 and price_ok(clean[-1], price):
             clean.append(price)
     closes = clean
     cash = cash_micro
@@ -79,29 +87,45 @@ def replay_closes(
             if entry_signal("REPLAY", window, rsi_buy) is None:
                 i += 1
                 continue
-            price = closes[i]
-            spend = cash * alloc_bps // 10_000
+            fill = _next_price(closes, i)
+            paid = slip_price(fill or 0, slip_bps, True)
+            if paid <= 0:
+                break
+            spend = budget_micro(cash, alloc_bps)
             if spend < min_notional_micro:
                 break
-            bought, fee = paper_buy(spend, price, taker_bps)
-            if bought <= 0:
+            planned = plan_paper_buy(spend, paid, base_step_atoms, taker_bps)
+            if planned is None:
                 break
-            cash -= spend
+            bought, fee, debit = planned
+            cash -= debit
             fees += fee
-            entry = price
-            peak = price
+            entry = paid
+            peak = paid
             base = bought
-            spent = spend
+            spent = debit
+            i += 2
+            continue
+        price = slip_price(closes[i], slip_bps, False)
+        if price <= 0 or not mark_ok(peak, price):
             i += 1
             continue
-        price = closes[i]
         if price > peak:
             peak = price
         reason = exit_reason(entry, price, peak, stop_bps, take_bps, trail_arm_bps, trail_gap_bps)
         if reason is None:
             i += 1
             continue
-        credit, fee = paper_sell(base, price, taker_bps)
+        fill = _next_price(closes, i)
+        sold = slip_price(fill or 0, slip_bps, False)
+        if sold <= 0 or not mark_ok(peak, sold):
+            i += 1
+            continue
+        credit, fee = paper_sell(base, sold, taker_bps)
+        gross = notional_micro(base, sold)
+        if credit <= 0 or fee < 0 or credit + fee != gross:
+            i += 1
+            continue
         fees += fee
         cash += credit
         pnl = credit - spent
@@ -109,12 +133,15 @@ def replay_closes(
         trades += 1
         if pnl > 0:
             wins += 1
-        fills.append(Fill(entry, price, pnl))
+        fills.append(Fill(entry, sold, pnl))
         entry = 0
         base = 0
         spent = 0
-        i += 1
-    return ReplayResult(trades, wins, net, fees, ended_open=entry != 0, fills=tuple(fills))
+        i += 2
+    mark, known = _open_mark(entry, peak, base, spent, closes[-1] if closes else 0, taker_bps, slip_bps)
+    return ReplayResult(
+        trades, wins, net, fees, ended_open=entry != 0, fills=tuple(fills), open_micro=mark, open_known=known
+    )
 
 
 def replay_lift_bars(
@@ -128,16 +155,18 @@ def replay_lift_bars(
     trail_arm_bps: int = 120,
     trail_gap_bps: int = 80,
     min_notional_micro: int,
+    base_step_atoms: int = 1,
+    slip_bps: int = 0,
 ) -> ReplayResult:
     """Candle half of the liquidity rule. Bid/ask and the oracle are not in the tape.
 
     Each bar is high, low, close, quote volume. A jump in close is dropped.
     """
-    if not bars:
+    if not bars or bars[0][2] <= 0 or base_step_atoms <= 0:
         return ReplayResult(0, 0, 0, 0, False, ())
     clean = [bars[0]]
     for bar in bars[1:]:
-        if price_ok(clean[-1][2], bar[2]):
+        if bar[2] > 0 and price_ok(clean[-1][2], bar[2]):
             clean.append(bar)
     bars = clean
     cash = cash_micro
@@ -159,28 +188,45 @@ def replay_lift_bars(
             if candle_lift("REPLAY", volumes, high, low, close) is None:
                 i += 1
                 continue
-            spend = cash * alloc_bps // 10_000
+            fill = _next_price([bar[2] for bar in bars], i)
+            paid = slip_price(fill or 0, slip_bps, True)
+            if paid <= 0:
+                break
+            spend = budget_micro(cash, alloc_bps)
             if spend < min_notional_micro:
                 break
-            bought, fee = paper_buy(spend, close, taker_bps)
-            if bought <= 0:
+            planned = plan_paper_buy(spend, paid, base_step_atoms, taker_bps)
+            if planned is None:
                 break
-            cash -= spend
+            bought, fee, debit = planned
+            cash -= debit
             fees += fee
-            entry = close
-            peak = close
+            entry = paid
+            peak = paid
             base = bought
-            spent = spend
+            spent = debit
+            i += 2
+            continue
+        close = slip_price(bars[i][2], slip_bps, False)
+        if close <= 0 or not mark_ok(peak, close):
             i += 1
             continue
-        close = bars[i][2]
         if close > peak:
             peak = close
         reason = exit_reason(entry, close, peak, stop_bps, take_bps, trail_arm_bps, trail_gap_bps)
         if reason is None:
             i += 1
             continue
-        credit, fee = paper_sell(base, close, taker_bps)
+        fill = _next_price([bar[2] for bar in bars], i)
+        sold = slip_price(fill or 0, slip_bps, False)
+        if sold <= 0 or not mark_ok(peak, sold):
+            i += 1
+            continue
+        credit, fee = paper_sell(base, sold, taker_bps)
+        gross = notional_micro(base, sold)
+        if credit <= 0 or fee < 0 or credit + fee != gross:
+            i += 1
+            continue
         fees += fee
         cash += credit
         pnl = credit - spent
@@ -188,9 +234,82 @@ def replay_lift_bars(
         trades += 1
         if pnl > 0:
             wins += 1
-        fills.append(Fill(entry, close, pnl))
+        fills.append(Fill(entry, sold, pnl))
         entry = 0
         base = 0
         spent = 0
-        i += 1
-    return ReplayResult(trades, wins, net, fees, ended_open=entry != 0, fills=tuple(fills))
+        i += 2
+    last = bars[-1][2] if bars else 0
+    mark, known = _open_mark(entry, peak, base, spent, last, taker_bps, slip_bps)
+    return ReplayResult(
+        trades, wins, net, fees, ended_open=entry != 0, fills=tuple(fills), open_micro=mark, open_known=known
+    )
+
+
+def _next_price(prices: list[int], index: int) -> int | None:
+    """Close of the following bar. The signal bar is not the fill."""
+    nxt = index + 1
+    if nxt >= len(prices) or prices[nxt] <= 0:
+        return None
+    return prices[nxt]
+
+
+def _open_mark(
+    entry: int, peak: int, base: int, spent: int, price: int, taker_bps: int, slip_bps: int
+) -> tuple[int, bool]:
+    """Open mark after the sell fee and the spread. Unknown when the price cannot be used."""
+    if entry == 0:
+        return 0, True
+    sold = slip_price(price, slip_bps, False)
+    if base <= 0 or spent <= 0 or sold <= 0 or not mark_ok(peak, sold):
+        return 0, False
+    credit, fee = paper_sell(base, sold, taker_bps)
+    gross = notional_micro(base, sold)
+    if credit <= 0 or fee < 0 or credit + fee != gross:
+        return 0, False
+    return credit - spent, True
+
+
+def hold_net(
+    closes: list[int],
+    *,
+    cash_micro: int,
+    alloc_bps: int,
+    taker_bps: int,
+    base_step_atoms: int,
+    min_notional_micro: int,
+    slip_bps: int = 0,
+) -> int | None:
+    """Buy the same allocation as the rule after warmup and sell on the last close.
+
+    None means the hold could not be priced.
+    """
+    if len(closes) < 42 or base_step_atoms <= 0 or closes[41] <= 0 or closes[-1] <= 0:
+        return None
+    spend = budget_micro(cash_micro, alloc_bps)
+    if spend < min_notional_micro:
+        return None
+    buy = slip_price(closes[41], slip_bps, True)
+    sell = slip_price(closes[-1], slip_bps, False)
+    if buy <= 0 or sell <= 0:
+        return None
+    planned = plan_paper_buy(spend, buy, base_step_atoms, taker_bps)
+    if planned is None:
+        return None
+    base, _fee, debit = planned
+    credit, fee = paper_sell(base, sell, taker_bps)
+    gross = notional_micro(base, sell)
+    if credit <= 0 or fee < 0 or credit + fee != gross:
+        return None
+    return credit - debit
+
+
+def median_micro(values: list[int]) -> int | None:
+    """Middle value. An even count uses the lower of the two middle values."""
+    if not values:
+        return None
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    if len(ordered) % 2 == 1:
+        return ordered[mid]
+    return min(ordered[mid - 1], ordered[mid])

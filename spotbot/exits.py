@@ -21,6 +21,8 @@ def exit_reason(
     trail_arm_bps: int,
     trail_gap_bps: int,
 ) -> str | None:
+    if min(stop_bps, take_bps, trail_arm_bps, trail_gap_bps) <= 0:
+        raise ValueError("exit percents must be positive")
     profit = pnl_bps(entry, price)
     peak_profit = pnl_bps(entry, max(peak, price))
     if peak_profit >= trail_arm_bps and peak_profit - profit >= trail_gap_bps:

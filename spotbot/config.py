@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 
-from spotbot.money import parse_micro
+from spotbot.money import MoneyError, parse_micro
+
+_SYMBOL = re.compile(r"^[A-Z0-9]{2,10}USDT$")
 
 
 class ConfigError(RuntimeError):
@@ -33,6 +36,67 @@ class Config:
     symbol_lock: bool
     api_key: str
     api_secret: str
+    drawdown_bps: int = 1_000
+    stop_lock_count: int = 3
+    stop_lock_sec: int = 14_400
+    spread_bps: int = 30
+    entries: bool = False
+
+
+def require_cycle_config(cfg: Config) -> None:
+    """Refuse a config the cycle must not trade. Same bounds as the env loader."""
+    if not cfg.symbols or len(set(cfg.symbols)) != len(cfg.symbols):
+        raise ConfigError("symbols are empty or repeated")
+    for symbol in cfg.symbols:
+        if _SYMBOL.fullmatch(symbol) is None:
+            raise ConfigError(f"{symbol} is not a USDT pair")
+    if cfg.mode not in ("rsi", "liquidity"):
+        raise ConfigError("mode must be rsi or liquidity")
+    if cfg.interval_sec < 15 or cfg.interval_sec > 86_400:
+        raise ConfigError("interval is out of range")
+    if cfg.max_positions < 1 or cfg.max_positions > 14:
+        raise ConfigError("slots are out of range")
+    if cfg.alloc_bps < 1 or cfg.alloc_bps > 10_000:
+        raise ConfigError("allocation is out of range")
+    if cfg.rsi_buy < 1 or cfg.rsi_buy > 99:
+        raise ConfigError("rsi is out of range")
+    if cfg.taker_bps < 0 or cfg.taker_bps > 100:
+        raise ConfigError("taker fee is out of range")
+    if cfg.daily_loss_bps < 0 or cfg.daily_loss_bps > 10_000:
+        raise ConfigError("daily loss is out of range")
+    if cfg.stop_cooldown_sec < 0 or cfg.stop_cooldown_sec > 86_400:
+        raise ConfigError("stop cooldown is out of range")
+    if cfg.drawdown_bps < 0 or cfg.drawdown_bps > 10_000:
+        raise ConfigError("drawdown is out of range")
+    if cfg.stop_lock_count < 2 or cfg.stop_lock_count > 10:
+        raise ConfigError("stop lock count is out of range")
+    if cfg.stop_lock_sec < 0 or cfg.stop_lock_sec > 86_400:
+        raise ConfigError("stop lock is out of range")
+    if cfg.spread_bps < 1 or cfg.spread_bps > 500:
+        raise ConfigError("spread limit is out of range")
+    if cfg.paper_cash_micro < 0 or cfg.min_notional_micro <= 0:
+        raise ConfigError("cash must be >= 0 and the minimum order > 0")
+    if min(cfg.stop_bps, cfg.take_bps, cfg.trail_arm_bps, cfg.trail_gap_bps) <= 0:
+        raise ConfigError("exit percents must be positive")
+
+
+def _env_int(name: str, default: str, low: int, high: int) -> int:
+    """Read one integer env. A blank, a sign, or a fraction is refused."""
+    raw = os.environ.get(name, default).strip()
+    if not raw.isdigit():
+        raise ConfigError(f"{name} must be an integer")
+    value = int(raw)
+    if value < low or value > high:
+        raise ConfigError(f"{name} must be {low}..{high}")
+    return value
+
+
+def _env_flag(name: str, default: str) -> bool:
+    """Read 0 or 1. Anything else is refused, not treated as on."""
+    raw = os.environ.get(name, default).strip()
+    if raw not in ("0", "1"):
+        raise ConfigError(f"{name} must be 0 or 1")
+    return raw == "1"
 
 
 def load_config(live_flag: bool, mode: str | None = None) -> Config:
@@ -43,9 +107,12 @@ def load_config(live_flag: bool, mode: str | None = None) -> Config:
     )
     if not symbols:
         raise ConfigError("SPOT_SYMBOLS is empty")
-    interval = int(os.environ.get("SPOT_INTERVAL_SEC", "60"))
-    if interval < 15:
-        raise ConfigError("SPOT_INTERVAL_SEC must be >= 15")
+    if len(set(symbols)) != len(symbols):
+        raise ConfigError("SPOT_SYMBOLS has a duplicate")
+    for symbol in symbols:
+        if _SYMBOL.fullmatch(symbol) is None:
+            raise ConfigError(f"{symbol} is not a USDT pair")
+    interval = _env_int("SPOT_INTERVAL_SEC", "60", 15, 86_400)
     env_live = os.environ.get("SPOT_LIVE", "0") == "1"
     live = bool(live_flag and env_live)
     key = os.environ.get("MEXC_API_KEY", "").strip()
@@ -57,23 +124,27 @@ def load_config(live_flag: bool, mode: str | None = None) -> Config:
     chosen = (mode or os.environ.get("SPOT_MODE", "rsi")).strip().lower()
     if chosen not in ("rsi", "liquidity"):
         raise ConfigError("SPOT_MODE must be rsi or liquidity")
-    taker_bps = int(os.environ.get("SPOT_TAKER_BPS", "5"))
-    if taker_bps < 0 or taker_bps > 100:
-        raise ConfigError("SPOT_TAKER_BPS must be 0..100")
-    daily_loss_bps = int(os.environ.get("SPOT_DAILY_LOSS_BPS", "500"))
-    if daily_loss_bps < 0 or daily_loss_bps > 10_000:
-        raise ConfigError("SPOT_DAILY_LOSS_BPS must be 0..10000")
-    stop_cooldown_sec = int(os.environ.get("SPOT_STOP_COOLDOWN_SEC", "900"))
-    if stop_cooldown_sec < 0 or stop_cooldown_sec > 86_400:
-        raise ConfigError("SPOT_STOP_COOLDOWN_SEC must be 0..86400")
-    return Config(
+    taker_bps = _env_int("SPOT_TAKER_BPS", "5", 0, 100)
+    daily_loss_bps = _env_int("SPOT_DAILY_LOSS_BPS", "500", 0, 10_000)
+    stop_cooldown_sec = _env_int("SPOT_STOP_COOLDOWN_SEC", "900", 0, 86_400)
+    drawdown_bps = _env_int("SPOT_DRAWDOWN_BPS", "1000", 0, 10_000)
+    stop_lock_count = _env_int("SPOT_STOP_LOCK_COUNT", "3", 2, 10)
+    stop_lock_sec = _env_int("SPOT_STOP_LOCK_SEC", "14400", 0, 86_400)
+    spread_bps = _env_int("SPOT_SPREAD_BPS", "30", 1, 500)
+    entries = _env_flag("SPOT_ENTRIES", "0")
+    try:
+        paper_cash = parse_micro(os.environ.get("SPOT_PAPER_CASH_USDT", "1000"))
+        min_notional = parse_micro(os.environ.get("SPOT_MIN_USDT", "3"))
+    except MoneyError as exc:
+        raise ConfigError(str(exc)) from exc
+    built = Config(
         symbols=symbols,
-        paper_cash_micro=parse_micro(os.environ.get("SPOT_PAPER_CASH_USDT", "1000")),
+        paper_cash_micro=paper_cash,
         interval_sec=interval,
-        max_positions=int(os.environ.get("SPOT_MAX_POSITIONS", "3")),
-        alloc_bps=int(os.environ.get("SPOT_ALLOC_BPS", "2000")),
-        min_notional_micro=parse_micro(os.environ.get("SPOT_MIN_USDT", "3")),
-        rsi_buy=int(os.environ.get("SPOT_RSI_BUY", "35")),
+        max_positions=_env_int("SPOT_MAX_POSITIONS", "3", 1, 14),
+        alloc_bps=_env_int("SPOT_ALLOC_BPS", "2000", 1, 10_000),
+        min_notional_micro=min_notional,
+        rsi_buy=_env_int("SPOT_RSI_BUY", "35", 1, 99),
         stop_bps=350,
         take_bps=700,
         trail_arm_bps=300,
@@ -86,4 +157,11 @@ def load_config(live_flag: bool, mode: str | None = None) -> Config:
         symbol_lock=False,
         api_key=key,
         api_secret=secret,
+        drawdown_bps=drawdown_bps,
+        stop_lock_count=stop_lock_count,
+        stop_lock_sec=stop_lock_sec,
+        spread_bps=spread_bps,
+        entries=entries,
     )
+    require_cycle_config(built)
+    return built

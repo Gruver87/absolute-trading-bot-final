@@ -11,7 +11,7 @@ import threading
 
 import requests
 
-from spotbot.money import MoneyError, parse_micro
+from spotbot.money import MoneyError, parse_price
 
 LOG = logging.getLogger("spotbot.oracle")
 _LOCAL = threading.local()
@@ -127,7 +127,7 @@ def venue_quotes(symbol: str, timeout_sec: int = 5) -> dict[str, int]:
             raw = pick(response.json())
             if raw is None:
                 continue
-            found[label] = parse_micro(str(raw))
+            found[label] = parse_price(str(raw))
         except (MoneyError, ValueError, TypeError) as exc:
             LOG.warning("oracle %s %s parse: %s", label, symbol, exc)
     return found

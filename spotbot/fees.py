@@ -6,7 +6,7 @@ does not add a second fee on top of an exchange debit.
 
 from __future__ import annotations
 
-from spotbot.money import BASE_ATOMS
+from spotbot.money import base_for_quote, notional_micro
 
 STANDARD_TAKER_BPS = 5
 
@@ -25,13 +25,13 @@ def paper_buy(spend_micro: int, price_micro: int, taker_bps: int) -> tuple[int, 
     net = spend_micro - fee
     if net <= 0:
         return 0, fee
-    return net * BASE_ATOMS // price_micro, fee
+    return base_for_quote(net, price_micro), fee
 
 
 def paper_sell(base_atoms: int, price_micro: int, taker_bps: int) -> tuple[int, int]:
     """Return quote credited after fee, and the fee."""
     if base_atoms <= 0 or price_micro <= 0:
         return 0, 0
-    gross = base_atoms * price_micro // BASE_ATOMS
+    gross = notional_micro(base_atoms, price_micro)
     fee = fee_on(gross, taker_bps)
     return gross - fee, fee

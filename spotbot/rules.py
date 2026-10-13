@@ -9,7 +9,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from spotbot.fees import fee_on
-from spotbot.money import BASE_ATOMS, MICRO, MoneyError, parse_micro, to_satoshi
+from spotbot.money import (
+    BASE_ATOMS,
+    MICRO,
+    PRICE_SCALE,
+    MoneyError,
+    base_for_quote,
+    notional_micro,
+    parse_micro,
+    to_satoshi,
+)
 
 
 class RuleError(ValueError):
@@ -26,6 +35,7 @@ class SymbolRule:
     quote_step_micro: int
     max_quote_micro: int
     base_asset: str = ""
+    price_tick: int = 1
 
 
 def parse_symbol_rule(row: dict[str, object]) -> SymbolRule:
@@ -36,8 +46,11 @@ def parse_symbol_rule(row: dict[str, object]) -> SymbolRule:
     step = _step_atoms(str(row.get("baseSizePrecision") or "0"))
     quote_step, quote_reason = _quote_step(row.get("quoteAmountPrecisionMarket") or row.get("quoteAmountPrecision"))
     max_quote = _max_quote(row.get("maxQuoteAmountMarket"))
-    reason = _refuse_reason(row) or quote_reason or _max_quote_reason(row.get("maxQuoteAmountMarket"))
-    return SymbolRule(symbol, reason == "", reason, taker_bps, step, quote_step, max_quote, str(row.get("baseAsset") or ""))
+    tick, tick_reason = _price_tick(row.get("quotePrecision"))
+    reason = _refuse_reason(row) or quote_reason or tick_reason or _max_quote_reason(row.get("maxQuoteAmountMarket"))
+    return SymbolRule(
+        symbol, reason == "", reason, taker_bps, step, quote_step, max_quote, str(row.get("baseAsset") or ""), tick
+    )
 
 
 def round_base_atoms(atoms: int, step_atoms: int) -> int:
@@ -56,6 +69,13 @@ def round_quote_micro(amount_micro: int, step_micro: int) -> int:
     if amount_micro <= 0 or step_micro <= 0:
         return 0
     return amount_micro // step_micro * step_micro
+
+
+def budget_micro(cash_micro: int, alloc_bps: int) -> int:
+    """Quote the book may spend. An allocation above the whole cash spends nothing."""
+    if cash_micro <= 0 or alloc_bps < 1 or alloc_bps > 10_000:
+        return 0
+    return cash_micro * alloc_bps // 10_000
 
 
 def cap_spend(
@@ -87,10 +107,10 @@ def plan_paper_buy(
     if spend_micro <= 0 or price_micro <= 0 or step_atoms <= 0 or taker_bps < 0:
         return None
     net = spend_micro - fee_on(spend_micro, taker_bps)
-    base = round_base_atoms(net * BASE_ATOMS // price_micro, step_atoms)
+    base = round_base_atoms(base_for_quote(net, price_micro), step_atoms)
     if base <= 0:
         return None
-    notional = base * price_micro // BASE_ATOMS
+    notional = notional_micro(base, price_micro)
     fee = fee_on(notional, taker_bps)
     debit = notional + fee
     if debit <= 0 or debit > spend_micro:
@@ -151,6 +171,22 @@ def _step_atoms(text: str) -> int:
     if atoms <= 0:
         raise RuleError("base step is zero")
     return atoms
+
+
+def _price_tick(raw: object) -> tuple[int, str]:
+    """quotePrecision is the number of decimals in the price, not in the order size."""
+    if isinstance(raw, bool) or raw is None or str(raw).strip() == "":
+        return 0, "price precision is missing"
+    text = str(raw).strip()
+    if not text.isdigit():
+        return 0, "price precision is not a count of decimals"
+    places = int(text)
+    if places > 12:
+        return 0, "price precision is finer than the price scale"
+    tick = PRICE_SCALE // (10 ** places)
+    if tick <= 0:
+        return 0, "price precision is finer than the price scale"
+    return tick, ""
 
 
 def _quote_step(raw: object) -> tuple[int, str]:

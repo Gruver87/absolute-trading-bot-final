@@ -12,6 +12,9 @@ from decimal import Decimal, InvalidOperation, ROUND_DOWN
 SATOSHI_MULTIPLIER = 1_000_000
 BASE_ATOMS = 100_000_000
 MICRO = SATOSHI_MULTIPLIER
+# One coin's price. 1e-12 USDT. Cash stays at 1e-6. A SHIB tick fits inside a 3.5% stop.
+PRICE_SCALE = 1_000_000_000_000
+_PRICE_PER_MICRO = PRICE_SCALE // SATOSHI_MULTIPLIER
 
 
 class MoneyError(ValueError):
@@ -74,8 +77,50 @@ def format_usdt(micro: int) -> str:
     return f"{sign}{whole}.{frac:06d}"
 
 
+def parse_price(text: str) -> int:
+    """Price of one coin in 1e-12 USDT. Floors. Float and bool are refused."""
+    if isinstance(text, bool) or isinstance(text, float) or not isinstance(text, str):
+        raise MoneyError("price must be a decimal string")
+    raw = text.strip()
+    if not raw:
+        raise MoneyError("empty price")
+    try:
+        value = Decimal(raw)
+    except (InvalidOperation, ValueError) as exc:
+        raise MoneyError(f"not a decimal: {text}") from exc
+    if not value.is_finite() or value <= 0:
+        raise MoneyError(f"price must be positive: {text}")
+    scaled = (value * Decimal(PRICE_SCALE)).to_integral_value(rounding=ROUND_DOWN)
+    if scaled <= 0:
+        raise MoneyError(f"price rounds to zero: {text}")
+    return int(scaled)
+
+
+def format_price(price: int) -> str:
+    """Render a coin price. This is not a cash balance."""
+    if isinstance(price, bool) or not isinstance(price, int) or price < 0:
+        raise MoneyError("price must be a non-negative int")
+    return format_fixed(price, PRICE_SCALE)
+
+
+def notional_micro(base_atoms: int, price: int) -> int:
+    """Quote cash for a coin amount at this price. Both must be integers."""
+    if isinstance(base_atoms, bool) or isinstance(price, bool):
+        raise MoneyError("notional refuses a bool")
+    if base_atoms < 0 or price <= 0:
+        raise MoneyError("notional needs a positive price and a base that is not negative")
+    return base_atoms * price // (BASE_ATOMS * _PRICE_PER_MICRO)
+
+
+def base_for_quote(quote_micro: int, price: int) -> int:
+    """Base atoms bought by quote_micro at this price, before the lot step."""
+    if quote_micro <= 0 or price <= 0:
+        return 0
+    return quote_micro * _PRICE_PER_MICRO * BASE_ATOMS // price
+
+
 def implied_price_micro(quote_micro: int, base_atoms: int) -> int:
-    """Average fill: quote spent divided by base received. Not the ticker before the order."""
+    """Average fill in the price scale. Not the ticker before the order."""
     if quote_micro <= 0 or base_atoms <= 0:
         raise MoneyError("fill price needs a positive quote and base")
-    return quote_micro * BASE_ATOMS // base_atoms
+    return quote_micro * _PRICE_PER_MICRO * BASE_ATOMS // base_atoms

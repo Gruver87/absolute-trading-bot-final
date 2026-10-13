@@ -53,8 +53,22 @@ def ledger_dir(root: Path, live: bool) -> Path:
     return root / ("live" if live else "paper")
 
 
+def sleeve_symbols() -> tuple[str, ...]:
+    """The fixed pair list. One coin belongs to one sleeve."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for sleeve in SLEEVES:
+        for symbol in sleeve.symbols:
+            if symbol in seen or not symbol.endswith("USDT") or len(symbol) <= 4:
+                raise SleeveError(f"{symbol} is in more than one sleeve")
+            seen.add(symbol)
+            out.append(symbol)
+    return tuple(out)
+
+
 def apply_funding(data_dir: Path, main_micro: int, live: bool = False) -> tuple[int, ...]:
     """Add only the new main-balance delta. Existing sleeve cash is kept."""
+    sleeve_symbols()
     if main_micro < 0:
         raise SleeveError("main balance must be >= 0")
     data_dir = ledger_dir(data_dir, live)

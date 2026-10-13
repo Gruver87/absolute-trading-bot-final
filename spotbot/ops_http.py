@@ -39,7 +39,7 @@ def snapshot(data_dir: Path, port: int = DEFAULT_PORT) -> dict[str, object]:
                 continue
             loaded = json.loads(path.read_text(encoding="utf-8"))
             key = name if folder == "" else f"{folder}/{name}"
-            books[key] = _public(loaded)
+            books[key] = _show_book(loaded)
     return {
         "bind": f"127.0.0.1:{port}",
         "mesh_ports": "18180-18182",
@@ -88,6 +88,28 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(body)
+
+
+def _show_book(loaded: object) -> object:
+    """Prices leave the page as text. A raw 1e12 integer does not survive in the browser."""
+    view = _public(loaded)
+    if not isinstance(view, dict) or not isinstance(loaded, dict):
+        return view
+    positions = view.get("positions")
+    if not isinstance(positions, list):
+        return view
+    from spotbot.money import format_price
+
+    legacy = "price_scale" not in loaded
+    for pos in positions:
+        if not isinstance(pos, dict):
+            continue
+        for key in ("entry_micro", "peak_micro"):
+            raw = pos.get(key)
+            if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+                continue
+            pos[key] = format_price(raw * 1_000_000 if legacy else raw)
+    return view
 
 
 def _public(value: object) -> object:
@@ -213,7 +235,7 @@ function renderBooks(books) {
       html += "<tr><td>treasury</td><td colspan='4'>уже разделено " + usdt(book.funded_micro) + "</td></tr>";
       continue;
     }
-    const pos = (book.positions || []).map(p => p.symbol + " @ " + usdt(p.entry_micro)).join(", ") || "—";
+    const pos = (book.positions || []).map(p => p.symbol + " @ " + shown(p.entry_micro)).join(", ") || "—";
     html += "<tr><td>" + name + "</td><td>" + usdt(book.cash_micro) + "</td><td>" + usdt(book.realized_micro) +
       "</td><td>" + usdt(book.fees_micro) + "</td><td>" + pos + "</td></tr>";
   }
@@ -238,6 +260,10 @@ function renderEvents(events) {
       "</td><td>" + (ev.symbol || "") + "</td><td>" + (ev.price || "") + "</td><td>" + (ev.reason || "") + "</td></tr>";
   }
   return html + "</tbody>";
+}
+function shown(value) {
+  if (typeof value === "string") return value;
+  return usdt(value);
 }
 function usdt(micro) {
   if (micro === undefined || micro === null) return "—";

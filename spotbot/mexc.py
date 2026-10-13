@@ -18,8 +18,10 @@ from spotbot.money import (
     MoneyError,
     format_fixed,
     implied_price_micro,
+    notional_micro,
     parse_micro,
     parse_micro_nonneg,
+    parse_price,
     to_satoshi,
 )
 from dataclasses import dataclass
@@ -87,10 +89,10 @@ class MexcClient:
             try:
                 rows.append(
                     (
-                        parse_micro(str(row[1])),
-                        parse_micro(str(row[2])),
-                        parse_micro(str(row[3])),
-                        parse_micro(str(row[4])),
+                        parse_price(str(row[1])),
+                        parse_price(str(row[2])),
+                        parse_price(str(row[3])),
+                        parse_price(str(row[4])),
                         parse_micro_nonneg(str(row[7])),
                     )
                 )
@@ -104,6 +106,30 @@ class MexcClient:
         if not isinstance(payload, dict):
             raise MexcError(f"no depth for {symbol}")
         return _side_notional(payload.get("bids")), _side_notional(payload.get("asks"))
+
+    def book_top(self, symbol: str) -> tuple[int, int]:
+        """Best bid and ask. One public request, not a socket. A crossed book is refused."""
+        payload = self._public("/api/v3/ticker/bookTicker", {"symbol": symbol})
+        if not isinstance(payload, dict):
+            raise MexcError(f"no book ticker for {symbol}")
+        try:
+            bid = parse_price(str(payload.get("bidPrice")))
+            ask = parse_price(str(payload.get("askPrice")))
+        except MoneyError as exc:
+            raise MexcError(f"bad book ticker for {symbol}") from exc
+        if ask < bid:
+            raise MexcError(f"crossed book for {symbol}")
+        return bid, ask
+
+    def book_spread_bps(self, symbol: str) -> int:
+        """Top-of-book width in basis points. One public request, not a socket."""
+        from spotbot.guards import top_spread_bps
+
+        try:
+            bid, ask = self.book_top(symbol)
+            return top_spread_bps(bid, ask)
+        except ValueError as exc:
+            raise MexcError(f"bad book ticker for {symbol}") from exc
 
     def liquid_usdt(self, min_quote_micro: int, change_min_bps: int, change_max_bps: int, cap: int) -> list[str]:
         """USDT pairs whose 24h quote volume is real and whose move has started, not finished."""
@@ -135,7 +161,7 @@ class MexcClient:
         if not isinstance(payload, dict) or "price" not in payload:
             raise MexcError(f"no price for {symbol}")
         try:
-            return parse_micro(str(payload["price"]))
+            return parse_price(str(payload["price"]))
         except MoneyError as exc:
             raise MexcError(f"bad price for {symbol}") from exc
 
@@ -338,11 +364,12 @@ def _side_notional(levels: object) -> int:
         if not isinstance(level, list) or len(level) < 2:
             raise MexcError("depth level is incomplete")
         try:
-            price = parse_micro(str(level[0]))
+            price = parse_price(str(level[0]))
             qty_micro = parse_micro_nonneg(str(level[1]))
         except MoneyError as exc:
             raise MexcError("depth level is not decimal") from exc
-        total += price * qty_micro // MICRO
+        atoms = qty_micro * (BASE_ATOMS // MICRO)
+        total += notional_micro(atoms, price)
     return total
 
 
@@ -362,15 +389,17 @@ def new_client_order_id(symbol: str, side: str) -> str:
 
 
 def executed_fill(body: dict[str, Any]) -> tuple[int, int, int] | None:
-    """Base, quote, and price of what actually traded. None when nothing traded."""
+    """Base, quote, and price of what actually traded.
+
+    None only when the executed quantity is empty or zero. A positive quantity
+    that is not a decimal, or a zero quote beside it, is an error: that is not
+    an empty fill.
+    """
     executed = str(body.get("executedQty") or "")
     raw = body.get("cummulativeQuoteQty") or body.get("cumulativeQuoteQty")
     if executed.strip() in ("", "0", "0.0", "0.00", "0.00000000"):
         return None
-    try:
-        base = _base_atoms(executed)
-    except MexcError:
-        return None
+    base = _base_atoms(executed)
     if raw in (None, ""):
         raise MexcError("executed order is missing quote qty")
     try:
@@ -378,7 +407,7 @@ def executed_fill(body: dict[str, Any]) -> tuple[int, int, int] | None:
     except MoneyError as exc:
         raise MexcError("executed order quote is not decimal") from exc
     if quote <= 0:
-        return None
+        raise MexcError("executed order quote is zero")
     try:
         return base, quote, implied_price_micro(quote, base)
     except MoneyError as exc:

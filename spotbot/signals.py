@@ -91,6 +91,8 @@ def closed_prices(prices: list[int]) -> list[int]:
 
 def entry_signal(symbol: str, prices: list[int], rsi_buy: int) -> Entry | None:
     """BUY only on oversold RSI confirmed by Bollinger or a MACD buy cross."""
+    if any(price <= 0 for price in prices):
+        return None
     value = rsi(prices)
     if value is None or value >= rsi_buy:
         return None

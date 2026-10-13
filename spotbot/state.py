@@ -79,6 +79,11 @@ class Book:
     pending_ack_base_fee: int | None = None
     pending_open_base: int = 0
     pending_open_quote: int = 0
+    pending_exchange_order_id: str = ""
+    equity_peak_micro: int = 0
+    pair_stops: dict[str, list[int]] | None = None
+    pair_lock_until: dict[str, int] | None = None
+    price_scale: int = 0
 
     def to_json(self) -> dict[str, object]:
         body: dict[str, object] = {
@@ -100,8 +105,13 @@ class Book:
             "pending_misses": self.pending_misses,
             "pending_open_base": self.pending_open_base,
             "pending_open_quote": self.pending_open_quote,
+            "pending_exchange_order_id": self.pending_exchange_order_id,
             "cooldown_until": self.cooldown_until,
             "ledger": self.ledger,
+            "equity_peak_micro": self.equity_peak_micro,
+            "pair_stops": self.pair_stops or {},
+            "pair_lock_until": self.pair_lock_until or {},
+            "price_scale": self.price_scale or 1_000_000_000_000,
             "positions": [pos.to_json() for pos in self.positions],
         }
         if self.credited_main_micro is not None:
@@ -119,6 +129,27 @@ def _as_int(value: object, label: str) -> int:
     return value
 
 
+def _pair_stops(raw: object) -> dict[str, list[int]]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise LedgerError("pair stops are not an object")
+    out: dict[str, list[int]] = {}
+    for key, value in raw.items():
+        if not isinstance(value, list):
+            raise LedgerError("pair stop times are not a list")
+        out[str(key)] = [_as_int(item, "pair stop") for item in value]
+    return out
+
+
+def _pair_locks(raw: object) -> dict[str, int]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise LedgerError("pair locks are not an object")
+    return {str(key): _as_int(value, "pair lock") for key, value in raw.items()}
+
+
 def load_book(path: Path, paper_cash_micro: int) -> Book:
     if not path.exists():
         return Book(cash_micro=paper_cash_micro, positions=[], realized_micro=0, fees_micro=0)
@@ -129,6 +160,12 @@ def load_book(path: Path, paper_cash_micro: int) -> Book:
     if not isinstance(rows, list):
         raise LedgerError("positions are not a list")
     positions = [Position.from_json(item) for item in rows]
+    if "price_scale" not in raw:
+        for pos in positions:
+            pos.entry_micro *= 1_000_000
+            pos.peak_micro *= 1_000_000
+    elif _as_int(raw.get("price_scale"), "price_scale") != 1_000_000_000_000:
+        raise LedgerError("price scale is not the coin price scale")
     book = Book(
         cash_micro=_as_int(raw["cash_micro"], "cash_micro"),
         positions=positions,
@@ -149,8 +186,13 @@ def load_book(path: Path, paper_cash_micro: int) -> Book:
         pending_misses=_as_int(raw.get("pending_misses", 0), "pending_misses"),
         pending_open_base=_as_int(raw.get("pending_open_base", 0), "pending_open_base"),
         pending_open_quote=_as_int(raw.get("pending_open_quote", 0), "pending_open_quote"),
+        pending_exchange_order_id=str(raw.get("pending_exchange_order_id") or ""),
         cooldown_until=_as_int(raw.get("cooldown_until", 0), "cooldown_until"),
         ledger=str(raw.get("ledger") or ""),
+        equity_peak_micro=_as_int(raw.get("equity_peak_micro", 0), "equity_peak_micro"),
+        pair_stops=_pair_stops(raw.get("pair_stops")),
+        pair_lock_until=_pair_locks(raw.get("pair_lock_until")),
+        price_scale=1_000_000_000_000,
         credited_main_micro=_as_int(raw["credited_main_micro"], "credited_main_micro") if "credited_main_micro" in raw else None,
         pending_ack_fee=_as_int(raw["pending_ack_fee"], "pending_ack_fee") if "pending_ack_fee" in raw else None,
         pending_ack_base_fee=_as_int(raw["pending_ack_base_fee"], "pending_ack_base_fee") if "pending_ack_base_fee" in raw else None,
@@ -176,6 +218,25 @@ def _sell_remainder_ok(book: Book, symbol: str) -> bool:
     return len(rows) == 1 and rows[0].base_atoms == left
 
 
+def _audit_pair_map(stops: dict[str, list[int]], locks: dict[str, int]) -> None:
+    for symbol, stamps in stops.items():
+        _audit_pair_symbol(symbol)
+        if len(stamps) > 8:
+            raise LedgerError("pair stop list is too long")
+        for stamp in stamps:
+            if stamp < 0 or stamp > 4_102_444_800:
+                raise LedgerError("pair stop is not a timestamp")
+    for symbol, until in locks.items():
+        _audit_pair_symbol(symbol)
+        if until < 0 or until > 4_102_444_800:
+            raise LedgerError("pair lock is not a timestamp")
+
+
+def _audit_pair_symbol(symbol: str) -> None:
+    if not symbol.endswith("USDT") or len(symbol) <= 4 or not symbol[:-4].isalnum() or not symbol[:-4].isupper():
+        raise LedgerError(f"{symbol or 'missing'} is not a USDT pair")
+
+
 def audit_book(book: Book) -> None:
     """Refuse a file that must not send an order. Realized loss may be negative."""
     if book.cash_micro < 0 or book.fees_micro < 0 or book.guard_cash_micro < 0:
@@ -186,6 +247,8 @@ def audit_book(book: Book) -> None:
         raise LedgerError("pending client id has no order")
     if book.pending_client_id and not client_id_ok(book.pending_client_id):
         raise LedgerError("pending client id is not an exchange id")
+    if book.pending_exchange_order_id and not exchange_order_id_ok(book.pending_exchange_order_id):
+        raise LedgerError("pending exchange order id is not digits")
     if book.pending_client_id and (not book.pending_symbol.endswith("USDT") or len(book.pending_symbol) <= 4):
         raise LedgerError("pending symbol is not a USDT pair")
     if not book.pending_client_id and (
@@ -209,6 +272,11 @@ def audit_book(book: Book) -> None:
     ):
         if amount < 0:
             raise LedgerError(f"{label} is negative")
+    if book.cooldown_until > 4_102_444_800:
+        raise LedgerError("cooldown is not a timestamp")
+    if book.equity_peak_micro < 0:
+        raise LedgerError("equity peak is negative")
+    _audit_pair_map(book.pair_stops or {}, book.pair_lock_until or {})
     if book.credited_main_micro is not None and book.credited_main_micro < 0:
         raise LedgerError("credited main is negative")
     if book.pending_ack_fee is not None and book.pending_ack_fee < 0:
@@ -240,6 +308,16 @@ def audit_book(book: Book) -> None:
         seen_symbols.add(pos.symbol)
         if pos.base_atoms <= 0 or pos.quote_micro < 0 or pos.entry_micro <= 0 or pos.peak_micro <= 0:
             raise LedgerError(f"{pos.symbol} size or price is not positive")
+        if pos.peak_micro < pos.entry_micro:
+            raise LedgerError(f"{pos.symbol} peak is below the entry")
+        if book.pending_side == "SELL" and book.pending_client_id and pos.client_order_id == book.pending_client_id:
+            raise LedgerError("sell client id is already on a position")
+        if (
+            book.pending_side == "SELL"
+            and book.pending_exchange_order_id
+            and pos.exchange_order_id == book.pending_exchange_order_id
+        ):
+            raise LedgerError("sell exchange id is already on a position")
         if pos.client_order_id:
             if not client_id_ok(pos.client_order_id):
                 raise LedgerError("client id is not an exchange id")
@@ -302,6 +380,7 @@ def clear_pending(book: Book) -> None:
     book.pending_misses = 0
     book.pending_open_base = 0
     book.pending_open_quote = 0
+    book.pending_exchange_order_id = ""
     book.pending_ack_fee = None
     book.pending_ack_base_fee = None
 
@@ -336,6 +415,7 @@ def remember_pending(
     book.pending_misses = 0
     book.pending_open_base = 0
     book.pending_open_quote = 0
+    book.pending_exchange_order_id = ""
     book.pending_ack_fee = None
     book.pending_ack_base_fee = None
 
@@ -356,6 +436,8 @@ def _buy_fill_held(book: Book, client_order_id: str, symbol: str) -> bool:
     try:
         price = implied_price_micro(book.pending_applied_quote, net)
     except MoneyError:
+        return False
+    if book.pending_exchange_order_id and rows[0].exchange_order_id != book.pending_exchange_order_id:
         return False
     return rows[0].entry_micro == price and rows[0].peak_micro >= rows[0].entry_micro
 
@@ -419,6 +501,7 @@ def apply_buy_progress(
         or book.pending_symbol != symbol
         or not client_id_ok(client_order_id)
         or not exchange_order_id_ok(exchange_order_id)
+        or (book.pending_exchange_order_id != "" and book.pending_exchange_order_id != exchange_order_id)
     ):
         return False
     if book.pending_quote_micro <= 0 or quote_micro > book.pending_quote_micro or fee_micro > quote_micro:
@@ -499,8 +582,15 @@ def apply_sell_progress(
     """Move the book forward to the latest sell fill. Only the new part is credited."""
     if book.pending_side != "SELL" or book.pending_symbol != symbol:
         return False
-    if book.pending_base_atoms <= 0 or sold_atoms > book.pending_base_atoms or fee_micro > quote_micro:
+    if quote_micro <= 0 or book.pending_base_atoms <= 0 or sold_atoms > book.pending_base_atoms or fee_micro > quote_micro:
         return False
+    for pos in book.positions:
+        if pos.symbol != symbol:
+            continue
+        if pos.client_order_id and pos.client_order_id == book.pending_client_id:
+            return False
+        if book.pending_exchange_order_id and pos.exchange_order_id == book.pending_exchange_order_id:
+            return False
     if (
         sold_atoms < book.pending_applied_atoms
         or quote_micro < book.pending_applied_quote
