@@ -53,7 +53,11 @@ def split_equal(amount_micro: int, parts: int = 3) -> tuple[int, ...]:
 def _funded_micro(path: Path) -> int:
     """The amount already split. A bool, a fraction, or a broken file does not add cash."""
     try:
+        if path.stat().st_size > 1_000_000:
+            raise SleeveError("treasury file is too large")
         raw = json.loads(path.read_text(encoding="utf-8"))
+    except SleeveError:
+        raise
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise SleeveError("treasury is not json") from exc
     if not isinstance(raw, dict) or "funded_micro" not in raw:

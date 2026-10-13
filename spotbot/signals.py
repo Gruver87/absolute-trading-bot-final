@@ -10,9 +10,16 @@ import math
 from dataclasses import dataclass
 
 
+def _whole(value: object) -> bool:
+    """True for a real int. A bool or a fraction is not a price or a period."""
+    return not isinstance(value, bool) and isinstance(value, int)
+
+
 def rsi(prices: list[int], period: int = 14) -> int | None:
     """Return RSI rounded to an integer, or None when the window is short."""
-    if period < 1 or len(prices) < period + 1:
+    if not _whole(period) or period < 1 or not all(_whole(price) and price > 0 for price in prices):
+        return None
+    if len(prices) < period + 1:
         return None
     gains = 0
     losses = 0
@@ -30,7 +37,7 @@ def rsi(prices: list[int], period: int = 14) -> int | None:
 
 
 def _ema_last(values: list[int], period: int) -> int | None:
-    if len(values) < period:
+    if not _whole(period) or period < 1 or not all(_whole(price) for price in values) or len(values) < period:
         return None
     acc = sum(values[:period]) // period
     num = 2
@@ -42,7 +49,9 @@ def _ema_last(values: list[int], period: int) -> int | None:
 
 def macd_cross(prices: list[int], fast: int = 12, slow: int = 26, signal: int = 9) -> str | None:
     """Return buy/sell on a fresh MACD cross, else None."""
-    if len(prices) < slow + signal + 1:
+    if not all(_whole(item) and item >= 1 for item in (fast, slow, signal)):
+        return None
+    if not all(_whole(price) and price > 0 for price in prices) or len(prices) < slow + signal + 1:
         return None
     macd_line: list[int] = []
     for end in range(slow, len(prices) + 1):
@@ -67,6 +76,8 @@ def macd_cross(prices: list[int], fast: int = 12, slow: int = 26, signal: int = 
 
 def below_lower_band(prices: list[int], period: int = 20) -> bool:
     """True when the last price is at or under the lower Bollinger band (2 std)."""
+    if not _whole(period) or period < 1 or not all(_whole(price) and price > 0 for price in prices):
+        return False
     if len(prices) < period:
         return False
     window = prices[-period:]
@@ -92,7 +103,7 @@ def closed_prices(prices: list[int]) -> list[int]:
 
 def entry_signal(symbol: str, prices: list[int], rsi_buy: int) -> Entry | None:
     """BUY only on oversold RSI confirmed by Bollinger or a MACD buy cross."""
-    if any(price <= 0 for price in prices):
+    if isinstance(rsi_buy, bool) or not isinstance(rsi_buy, int) or any(isinstance(price, bool) or not isinstance(price, int) or price <= 0 for price in prices):
         return None
     value = rsi(prices)
     if value is None or value >= rsi_buy:

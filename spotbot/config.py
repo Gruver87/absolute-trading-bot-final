@@ -48,10 +48,35 @@ def require_cycle_config(cfg: Config) -> None:
     if not cfg.symbols or len(set(cfg.symbols)) != len(cfg.symbols):
         raise ConfigError("symbols are empty or repeated")
     for symbol in cfg.symbols:
-        if _SYMBOL.fullmatch(symbol) is None:
+        if not isinstance(symbol, str) or _SYMBOL.fullmatch(symbol) is None:
             raise ConfigError(f"{symbol} is not a USDT pair")
+    if not isinstance(cfg.live, bool) or not isinstance(cfg.symbol_lock, bool) or not isinstance(cfg.entries, bool):
+        raise ConfigError("live, entries, and the pair lock must be on or off")
+    if not isinstance(cfg.api_key, str) or not isinstance(cfg.api_secret, str):
+        raise ConfigError("api key must be text")
     if cfg.mode not in ("rsi", "liquidity"):
         raise ConfigError("mode must be rsi or liquidity")
+    numbers = (
+        cfg.paper_cash_micro,
+        cfg.interval_sec,
+        cfg.max_positions,
+        cfg.alloc_bps,
+        cfg.min_notional_micro,
+        cfg.rsi_buy,
+        cfg.stop_bps,
+        cfg.take_bps,
+        cfg.trail_arm_bps,
+        cfg.trail_gap_bps,
+        cfg.taker_bps,
+        cfg.daily_loss_bps,
+        cfg.stop_cooldown_sec,
+        cfg.drawdown_bps,
+        cfg.stop_lock_count,
+        cfg.stop_lock_sec,
+        cfg.spread_bps,
+    )
+    if any(isinstance(item, bool) or not isinstance(item, int) for item in numbers):
+        raise ConfigError("config numbers must be integers")
     if cfg.interval_sec < 15 or cfg.interval_sec > 86_400:
         raise ConfigError("interval is out of range")
     if cfg.max_positions < 1 or cfg.max_positions > 14:

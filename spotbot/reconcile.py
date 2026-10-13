@@ -20,6 +20,8 @@ def inventory_mismatch(
         if symbol in seen:
             return f"{symbol} is listed twice"
         seen.add(symbol)
+        if isinstance(atoms, bool) or not isinstance(atoms, int):
+            return f"{symbol} base is not an integer"
         if atoms < 0:
             return f"{symbol} base is negative"
         if not symbol.endswith("USDT") or len(symbol) <= 4:
@@ -28,9 +30,11 @@ def inventory_mismatch(
         held[asset] = atoms
     for asset, need in held.items():
         have = bases_atoms.get(asset, 0)
-        if have != need:
+        if isinstance(have, bool) or not isinstance(have, int) or have != need:
             return f"{asset} exchange {have} != book {need}"
     for asset, have in bases_atoms.items():
+        if isinstance(have, bool) or not isinstance(have, int):
+            return f"exchange {asset} is not an integer"
         if have > 0 and asset not in held:
             return f"exchange holds {asset} and the book does not"
     return None
@@ -38,20 +42,36 @@ def inventory_mismatch(
 
 def base_is_free(free_atoms: int, need_atoms: int) -> bool:
     """A sell needs the whole position free. Locked coins stay on the book."""
+    if isinstance(free_atoms, bool) or not isinstance(free_atoms, int) or isinstance(need_atoms, bool) or not isinstance(need_atoms, int):
+        return False
     return need_atoms > 0 and free_atoms >= need_atoms
 
 
+def _status_name(body: object) -> str:
+    """Order status text. A float is not status 2, and a non-object is not filled."""
+    if not isinstance(body, dict):
+        return ""
+    status = body.get("status")
+    if isinstance(status, str):
+        return status
+    if isinstance(status, bool) or isinstance(status, float) or not isinstance(status, int):
+        return ""
+    return str(status)
+
+
 def order_filled(body: dict[str, object]) -> bool:
-    return str(body.get("status") or "") in ("FILLED", "2")
+    return _status_name(body) in ("FILLED", "2")
 
 
 def order_finished(body: dict[str, object]) -> bool:
     """The exchange will not fill this order further. A partial fill may already exist."""
-    return str(body.get("status") or "") in ("CANCELED", "PARTIALLY_CANCELED", "4", "5")
+    return _status_name(body) in ("CANCELED", "PARTIALLY_CANCELED", "4", "5")
 
 
 def order_missing(message: str) -> bool:
     """True only for an unknown order. A missing symbol or balance is not that."""
+    if not isinstance(message, str):
+        return False
     text = message.lower()
     return (
         "order does not exist" in text
@@ -67,16 +87,25 @@ def pending_gone(misses: int, applied_atoms: int, has_fill: bool, acked: bool = 
     An exchange order id already on the book means the order was accepted.
     "Order does not exist" does not erase that.
     """
+    if isinstance(misses, bool) or not isinstance(misses, int) or isinstance(applied_atoms, bool) or not isinstance(applied_atoms, int):
+        return False
+    if not isinstance(has_fill, bool) or not isinstance(acked, bool):
+        return False
     return misses >= 3 and applied_atoms == 0 and not has_fill and not acked
 
 
 def fills_match(traded_base: int, traded_quote: int, order_base: int, order_quote: int) -> bool:
     """True when the trade rows add up to the order fill. A short list is not a full fee."""
+    nums = (traded_base, traded_quote, order_base, order_quote)
+    if any(isinstance(item, bool) or not isinstance(item, int) for item in nums):
+        return False
     return traded_base == order_base and traded_quote == order_quote and order_base > 0 and order_quote > 0
 
 
 def ack_fee_matches(ack_fee_micro: int, trade_fee_micro: int) -> bool:
     """A fee named on the order ack must equal the trade rows. Zero means the ack omitted it."""
+    if isinstance(ack_fee_micro, bool) or not isinstance(ack_fee_micro, int) or isinstance(trade_fee_micro, bool) or not isinstance(trade_fee_micro, int):
+        return False
     if ack_fee_micro < 0 or trade_fee_micro < 0:
         return False
     return ack_fee_micro == 0 or ack_fee_micro == trade_fee_micro
@@ -84,24 +113,33 @@ def ack_fee_matches(ack_fee_micro: int, trade_fee_micro: int) -> bool:
 
 def fee_fits(fee_micro: int, room_micro: int) -> bool:
     """A known fee is booked in full. It is not trimmed to fit the cash or the fill."""
+    if isinstance(fee_micro, bool) or not isinstance(fee_micro, int) or isinstance(room_micro, bool) or not isinstance(room_micro, int):
+        return False
     return fee_micro >= 0 and room_micro >= fee_micro
 
 
 def order_is_ours(body: dict[str, object], symbol: str, side: str, client_id: str) -> bool:
     """True only when the ack is the symbol, side, and client id we sent."""
+    if not isinstance(body, dict) or not isinstance(symbol, str) or not isinstance(side, str) or not isinstance(client_id, str):
+        return False
     if not symbol or not side or not client_id:
         return False
-    ids = [
-        str(body.get(key))
-        for key in ("clientOrderId", "origClientOrderId", "newClientOrderId")
-        if body.get(key) not in (None, "")
-    ]
+    ids: list[str] = []
+    for key in ("clientOrderId", "origClientOrderId", "newClientOrderId"):
+        got = body.get(key)
+        if got in (None, ""):
+            continue
+        if not isinstance(got, str):
+            return False
+        ids.append(got)
     if not ids or any(item != client_id for item in ids):
         return False
-    got_symbol = str(body.get("symbol") or "")
-    got_side = str(body.get("side") or "").upper()
-    got_type = str(body.get("type") or "").upper()
-    return ids[0] == client_id and got_symbol == symbol and got_side == side.upper() and got_type == "MARKET"
+    got_symbol = body.get("symbol")
+    got_side = body.get("side")
+    got_type = body.get("type")
+    if not isinstance(got_symbol, str) or not isinstance(got_side, str) or not isinstance(got_type, str):
+        return False
+    return ids[0] == client_id and got_symbol == symbol and got_side.upper() == side.upper() and got_type.upper() == "MARKET"
 
 
 class FeeAssetError(ValueError):
@@ -118,6 +156,8 @@ def split_commission(
     quoteQty. A repeated id is not a second fill. The caller must match the
     totals to the order before booking the fee.
     """
+    if not isinstance(order_id, str) or not isinstance(base_asset, str) or not isinstance(side, str):
+        raise FeeAssetError("commission needs an order, a base asset, and a side")
     if not order_id or not base_asset or side not in ("BUY", "SELL"):
         raise FeeAssetError("commission needs an order, a base asset, and a side")
     if not order_id.isdigit() or len(order_id) > 32:
@@ -126,6 +166,7 @@ def split_commission(
         BASE_ATOMS,
         MICRO,
         MoneyError,
+        decimal_text,
         decimal_zero,
         notional_micro,
         parse_micro,
@@ -142,13 +183,23 @@ def split_commission(
     seen = False
     seen_ids: set[str] = set()
     for row in trades:
-        if not isinstance(row, dict) or str(row.get("orderId") or "") != order_id:
+        if not isinstance(row, dict):
+            continue
+        order_raw = row.get("orderId")
+        if order_raw in (None, ""):
+            continue
+        if not isinstance(order_raw, str):
+            raise FeeAssetError("trade order id is not digits")
+        if order_raw != order_id:
             continue
         seen = True
-        got_symbol = str(row.get("symbol") or "")
-        if got_symbol != f"{base_asset}USDT":
+        got_symbol = row.get("symbol")
+        if not isinstance(got_symbol, str) or got_symbol != f"{base_asset}USDT":
             raise FeeAssetError("trade symbol is not the order symbol")
-        trade_id = str(row.get("id") or "")
+        trade_raw = row.get("id")
+        if not isinstance(trade_raw, str):
+            raise FeeAssetError("trade id is not digits")
+        trade_id = trade_raw
         if not trade_id.isdigit() or len(trade_id) > 32:
             raise FeeAssetError("trade id is not digits")
         if trade_id in seen_ids:
@@ -161,8 +212,8 @@ def split_commission(
         if qty in (None, "") or quote in (None, ""):
             raise FeeAssetError("trade row has no qty")
         try:
-            row_base = to_satoshi(str(qty)) * (BASE_ATOMS // MICRO)
-            row_quote = parse_micro(str(quote))
+            row_base = to_satoshi(decimal_text(qty)) * (BASE_ATOMS // MICRO)
+            row_quote = parse_micro(decimal_text(quote))
         except MoneyError as exc:
             raise FeeAssetError("trade qty is not decimal") from exc
         if row_base <= 0 or row_quote <= 0:
@@ -171,7 +222,7 @@ def split_commission(
         if price_raw in (None, ""):
             raise FeeAssetError("trade row has no price")
         try:
-            row_price = parse_price(str(price_raw))
+            row_price = parse_price(decimal_text(price_raw))
         except MoneyError as exc:
             raise FeeAssetError("trade price is not decimal") from exc
         if row_price <= 0:
@@ -181,9 +232,18 @@ def split_commission(
             raise FeeAssetError("trade price does not match qty")
         traded_base += row_base
         traded_quote += row_quote
-        asset = str(row.get("commissionAsset") or "").upper()
-        raw = str(row.get("commission") or "0")
-        if raw.strip() in ("", "0", "0.0", "0.00") or decimal_zero(raw):
+        commission = row.get("commission")
+        if commission in (None, ""):
+            continue
+        asset_raw = row.get("commissionAsset")
+        if not isinstance(asset_raw, str) or not asset_raw:
+            raise FeeAssetError("commission asset is missing")
+        asset = asset_raw.upper()
+        try:
+            raw = decimal_text(commission)
+        except MoneyError as exc:
+            raise FeeAssetError("commission is not decimal") from exc
+        if raw in ("", "0", "0.0", "0.00") or decimal_zero(raw):
             continue
         if asset == "USDT":
             try:
@@ -213,15 +273,22 @@ def split_commission(
 
 def usdt_commission(trades: list[object], order_id: str) -> int:
     """Sum USDT commission rows for one exchange order. Other assets are ignored."""
-    if not order_id:
+    if not isinstance(order_id, str) or not order_id:
         return 0
-    from spotbot.money import parse_micro_nonneg
+    from spotbot.money import MoneyError, decimal_text, parse_micro_nonneg
 
     total = 0
     for row in trades:
-        if not isinstance(row, dict) or str(row.get("orderId") or "") != order_id:
+        if not isinstance(row, dict):
             continue
-        if str(row.get("commissionAsset") or "").upper() != "USDT":
+        order_raw = row.get("orderId")
+        if not isinstance(order_raw, str) or order_raw != order_id:
             continue
-        total += parse_micro_nonneg(str(row.get("commission") or "0"))
+        asset_raw = row.get("commissionAsset")
+        if not isinstance(asset_raw, str) or asset_raw.upper() != "USDT":
+            continue
+        commission = row.get("commission")
+        if commission in (None, ""):
+            continue
+        total += parse_micro_nonneg(decimal_text(commission))
     return total

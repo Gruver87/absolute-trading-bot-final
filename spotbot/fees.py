@@ -12,7 +12,12 @@ STANDARD_TAKER_BPS = 5
 
 
 def fee_on(notional_micro: int, taker_bps: int) -> int:
-    if isinstance(notional_micro, bool) or isinstance(taker_bps, bool):
+    if (
+        isinstance(notional_micro, bool)
+        or isinstance(taker_bps, bool)
+        or not isinstance(notional_micro, int)
+        or not isinstance(taker_bps, int)
+    ):
         raise ValueError("notional and fee must be integers")
     if notional_micro < 0 or taker_bps < 0:
         raise ValueError("notional and fee must be >= 0")
@@ -21,6 +26,15 @@ def fee_on(notional_micro: int, taker_bps: int) -> int:
 
 def paper_buy(spend_micro: int, price_micro: int, taker_bps: int) -> tuple[int, int]:
     """Spend quote. Return base atoms bought and the fee taken from quote."""
+    if (
+        isinstance(spend_micro, bool)
+        or isinstance(price_micro, bool)
+        or isinstance(taker_bps, bool)
+        or not isinstance(spend_micro, int)
+        or not isinstance(price_micro, int)
+        or not isinstance(taker_bps, int)
+    ):
+        return 0, 0
     if price_micro <= 0 or spend_micro <= 0:
         return 0, 0
     fee = fee_on(spend_micro, taker_bps)
@@ -32,6 +46,15 @@ def paper_buy(spend_micro: int, price_micro: int, taker_bps: int) -> tuple[int, 
 
 def paper_sell(base_atoms: int, price_micro: int, taker_bps: int) -> tuple[int, int]:
     """Return quote credited after fee, and the fee."""
+    if (
+        isinstance(base_atoms, bool)
+        or isinstance(price_micro, bool)
+        or isinstance(taker_bps, bool)
+        or not isinstance(base_atoms, int)
+        or not isinstance(price_micro, int)
+        or not isinstance(taker_bps, int)
+    ):
+        return 0, 0
     if base_atoms <= 0 or price_micro <= 0:
         return 0, 0
     gross = notional_micro(base_atoms, price_micro)

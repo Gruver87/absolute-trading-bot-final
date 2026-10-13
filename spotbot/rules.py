@@ -15,6 +15,7 @@ from spotbot.money import (
     PRICE_SCALE,
     MoneyError,
     base_for_quote,
+    decimal_text,
     notional_micro,
     parse_micro,
     parse_micro_nonneg,
@@ -44,7 +45,7 @@ def parse_symbol_rule(row: dict[str, object]) -> SymbolRule:
     if not symbol:
         raise RuleError("exchangeInfo row has no symbol")
     taker_bps = _taker_bps(row.get("takerCommission"))
-    step, step_reason = _step_atoms(str(row.get("baseSizePrecision") or "0"))
+    step, step_reason = _step_atoms(row.get("baseSizePrecision"))
     quote_step, quote_reason = _quote_step(row.get("quoteAmountPrecisionMarket") or row.get("quoteAmountPrecision"))
     max_quote = _max_quote(row.get("maxQuoteAmountMarket"))
     tick, tick_reason = _price_tick(row.get("quotePrecision"))
@@ -61,26 +62,28 @@ def parse_symbol_rule(row: dict[str, object]) -> SymbolRule:
 
 
 def round_base_atoms(atoms: int, step_atoms: int) -> int:
-    if isinstance(atoms, bool) or isinstance(step_atoms, bool) or atoms <= 0 or step_atoms <= 0:
+    if isinstance(atoms, bool) or isinstance(step_atoms, bool) or not isinstance(atoms, int) or not isinstance(step_atoms, int) or atoms <= 0 or step_atoms <= 0:
         return 0
     return atoms // step_atoms * step_atoms
 
 
 def uses_slot(base_atoms: int, step_atoms: int) -> bool:
     """Dust below the lot stays on the book and does not block a new entry."""
+    if isinstance(base_atoms, bool) or isinstance(step_atoms, bool) or not isinstance(base_atoms, int) or not isinstance(step_atoms, int):
+        return True
     return round_base_atoms(base_atoms, step_atoms) > 0
 
 
 def round_quote_micro(amount_micro: int, step_micro: int) -> int:
     """Floor the quote spend to the market minimum step from exchangeInfo."""
-    if isinstance(amount_micro, bool) or isinstance(step_micro, bool) or amount_micro <= 0 or step_micro <= 0:
+    if isinstance(amount_micro, bool) or isinstance(step_micro, bool) or not isinstance(amount_micro, int) or not isinstance(step_micro, int) or amount_micro <= 0 or step_micro <= 0:
         return 0
     return amount_micro // step_micro * step_micro
 
 
 def budget_micro(cash_micro: int, alloc_bps: int) -> int:
     """Quote the book may spend. An allocation above the whole cash spends nothing."""
-    if cash_micro <= 0 or alloc_bps < 1 or alloc_bps > 10_000:
+    if isinstance(cash_micro, bool) or isinstance(alloc_bps, bool) or not isinstance(cash_micro, int) or not isinstance(alloc_bps, int) or cash_micro <= 0 or alloc_bps < 1 or alloc_bps > 10_000:
         return 0
     return cash_micro * alloc_bps // 10_000
 
@@ -93,7 +96,8 @@ def cap_spend(
     max_micro: int,
 ) -> int:
     """Spend the smaller of the book budget and free quote. Locked quote is not free."""
-    if budget_micro <= 0 or free_micro < 0 or step_micro <= 0 or min_micro < 0:
+    nums = (budget_micro, free_micro, step_micro, min_micro, max_micro)
+    if any(isinstance(item, bool) or not isinstance(item, int) for item in nums) or budget_micro <= 0 or free_micro < 0 or step_micro <= 0 or min_micro < 0:
         return 0
     spend = budget_micro if budget_micro < free_micro else free_micro
     if max_micro > 0 and spend > max_micro:
@@ -111,7 +115,8 @@ def plan_paper_buy(
     taker_bps: int,
 ) -> tuple[int, int, int] | None:
     """Return base atoms, fee, and cash debit. Fee comes out of the spend."""
-    if spend_micro <= 0 or price_micro <= 0 or step_atoms <= 0 or taker_bps < 0:
+    nums = (spend_micro, price_micro, step_atoms, taker_bps)
+    if any(isinstance(item, bool) or not isinstance(item, int) for item in nums) or spend_micro <= 0 or price_micro <= 0 or step_atoms <= 0 or taker_bps < 0:
         return None
     net = spend_micro - fee_on(spend_micro, taker_bps)
     base = round_base_atoms(base_for_quote(net, price_micro), step_atoms)
@@ -153,11 +158,16 @@ def _refuse_reason(row: dict[str, object]) -> str:
     return ""
 
 
+def _as_decimal(raw: object) -> str:
+    """Exchange decimal text. A JSON float is not a lot, a fee, or a cap."""
+    return decimal_text(raw)
+
+
 def _taker_bps(raw: object) -> int:
-    if raw is None or str(raw).strip() == "":
+    if raw is None or (isinstance(raw, str) and raw.strip() == ""):
         raise RuleError("takerCommission missing")
     try:
-        micro = to_satoshi(str(raw))
+        micro = to_satoshi(_as_decimal(raw))
     except MoneyError as exc:
         raise RuleError("takerCommission is not decimal") from exc
     bps = (micro * 10_000 + MICRO - 1) // MICRO
@@ -166,12 +176,17 @@ def _taker_bps(raw: object) -> int:
     return bps
 
 
-def _step_atoms(text: str) -> tuple[int, str]:
-    raw = text.strip()
-    if raw in ("", "0", "0.0", "0.00"):
+def _step_atoms(raw: object) -> tuple[int, str]:
+    if raw is None or (isinstance(raw, str) and raw.strip() == ""):
         return 0, "base step is missing"
     try:
-        micro = to_satoshi(raw)
+        text = _as_decimal(raw)
+    except MoneyError:
+        return 0, "base step is not decimal"
+    if text in ("0", "0.0", "0.00"):
+        return 0, "base step is missing"
+    try:
+        micro = to_satoshi(text)
     except MoneyError:
         return 0, "base step is not decimal"
     atoms = micro * (BASE_ATOMS // MICRO)
@@ -182,9 +197,11 @@ def _step_atoms(text: str) -> tuple[int, str]:
 
 def _price_tick(raw: object) -> tuple[int, str]:
     """quotePrecision is the number of decimals in the price, not in the order size."""
-    if isinstance(raw, bool) or raw is None or str(raw).strip() == "":
+    if isinstance(raw, bool) or isinstance(raw, float):
+        return 0, "price precision is not a count of decimals"
+    if raw is None or (isinstance(raw, str) and raw.strip() == ""):
         return 0, "price precision is missing"
-    text = str(raw).strip()
+    text = raw.strip() if isinstance(raw, str) else str(raw)
     if not text.isdigit():
         return 0, "price precision is not a count of decimals"
     places = int(text)
@@ -198,10 +215,10 @@ def _price_tick(raw: object) -> tuple[int, str]:
 
 def _quote_step(raw: object) -> tuple[int, str]:
     """Market quote minimum. MEXC also uses this value as the quote step."""
-    if raw is None or str(raw).strip() == "":
+    if raw is None or (isinstance(raw, str) and raw.strip() == ""):
         return 0, "market min quote missing"
     try:
-        step = parse_micro_nonneg(str(raw))
+        step = parse_micro_nonneg(_as_decimal(raw))
     except MoneyError:
         return 0, "market min quote is not decimal"
     if step <= 0:
@@ -210,20 +227,20 @@ def _quote_step(raw: object) -> tuple[int, str]:
 
 
 def _max_quote(raw: object) -> int:
-    if raw is None or str(raw).strip() == "":
+    if raw is None or (isinstance(raw, str) and raw.strip() == ""):
         return 0
     try:
-        return parse_micro(str(raw))
+        return parse_micro(_as_decimal(raw))
     except MoneyError:
         return 0
 
 
 def _max_quote_reason(raw: object) -> str:
     """A present but unreadable or non-positive cap refuses the pair. An empty cap is unlimited."""
-    if raw is None or str(raw).strip() == "":
+    if raw is None or (isinstance(raw, str) and raw.strip() == ""):
         return ""
     try:
-        cap = parse_micro_nonneg(str(raw))
+        cap = parse_micro_nonneg(_as_decimal(raw))
     except MoneyError:
         return "max quote is not decimal"
     if cap <= 0:

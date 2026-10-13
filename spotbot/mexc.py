@@ -16,6 +16,7 @@ from spotbot.money import (
     MICRO,
     SATOSHI_MULTIPLIER,
     MoneyError,
+    decimal_text,
     format_fixed,
     implied_price_micro,
     notional_micro,
@@ -45,7 +46,7 @@ class MexcRateLimit(MexcError):
 
     def __init__(self, message: str, retry_after_sec: int | None = None) -> None:
         super().__init__(message)
-        if retry_after_sec is not None and (retry_after_sec < 1 or isinstance(retry_after_sec, bool)):
+        if retry_after_sec is not None and (isinstance(retry_after_sec, bool) or not isinstance(retry_after_sec, int) or retry_after_sec < 1):
             retry_after_sec = None
         self.retry_after_sec = retry_after_sec
 
@@ -90,6 +91,8 @@ class OrderFill:
 
 def clock_allows(local_ms: int, server_ms: int, limit_ms: int = 2000) -> bool:
     """True when the local clock is close enough for recvWindow=5000."""
+    if isinstance(local_ms, bool) or isinstance(server_ms, bool) or isinstance(limit_ms, bool) or not isinstance(local_ms, int) or not isinstance(server_ms, int) or not isinstance(limit_ms, int):
+        return False
     if local_ms < 0 or server_ms <= 0 or limit_ms < 0:
         return False
     return abs(local_ms - server_ms) <= limit_ms
@@ -97,7 +100,7 @@ def clock_allows(local_ms: int, server_ms: int, limit_ms: int = 2000) -> bool:
 
 class MexcClient:
     def __init__(self, api_key: str = "", api_secret: str = "", timeout_sec: int = 8) -> None:
-        if timeout_sec < 1:
+        if isinstance(timeout_sec, bool) or not isinstance(timeout_sec, int) or timeout_sec < 1:
             raise MexcError("timeout_sec must be >= 1")
         self._key = api_key
         self._secret = api_secret
@@ -110,10 +113,12 @@ class MexcClient:
         self._rules.clear()
 
     def klines(self, symbol: str, interval: str = "5m", limit: int = 80) -> list[int]:
+        _public_limit(limit, "kline")
         return [row[4] for row in self.ohlcv(symbol, interval, limit)]
 
     def ohlcv(self, symbol: str, interval: str = "5m", limit: int = 30) -> list[tuple[int, int, int, int, int]]:
         """Rows of open, high, low, close, quote-volume, all in micro-USDT."""
+        _public_limit(limit, "kline")
         payload = self._public(
             "/api/v3/klines",
             {"symbol": symbol, "interval": interval, "limit": str(limit)},
@@ -123,6 +128,7 @@ class MexcClient:
 
     def depth_notional(self, symbol: str, limit: int = 20) -> tuple[int, int]:
         """Bid and ask notional in micro-USDT for the top of the book."""
+        _public_limit(limit, "depth")
         payload = self._public("/api/v3/depth", {"symbol": symbol, "limit": str(limit)})
         return depth_notionals(payload, symbol)
 
@@ -194,9 +200,7 @@ class MexcClient:
         if not order_is_ours(body, symbol, "BUY", client_order_id):
             raise MexcError(f"buy ack is not {symbol} {client_order_id}")
         _require_filled(body, "buy")
-        executed = str(body.get("executedQty") or "")
-        if not executed:
-            raise MexcError(f"buy {symbol} returned no executedQty")
+        executed = _filled_base_text(body, "buy")
         quote = _filled_quote(body, "buy")
         if quote > quote_micro:
             raise MexcError(f"buy {symbol} filled more quote than requested")
@@ -208,7 +212,7 @@ class MexcClient:
             quote,
             usdt_fee,
             client_order_id,
-            str(body.get("orderId") or ""),
+            _order_id_text(body.get("orderId")),
             base_fee,
         )
 
@@ -229,9 +233,7 @@ class MexcClient:
         if not order_is_ours(body, symbol, "SELL", client_order_id):
             raise MexcError(f"sell ack is not {symbol} {client_order_id}")
         credit, fee, base_fee = _sell_credit(body, _base_asset(symbol))
-        executed = str(body.get("executedQty") or "")
-        if not executed:
-            raise MexcError(f"sell {symbol} returned no executedQty")
+        executed = _filled_base_text(body, "sell")
         sold = _base_atoms(executed)
         if sold > base_atoms:
             raise MexcError(f"sell {symbol} filled more base than requested")
@@ -240,7 +242,7 @@ class MexcClient:
             credit,
             fee,
             client_order_id,
-            str(body.get("orderId") or ""),
+            _order_id_text(body.get("orderId")),
             base_fee,
         )
 
@@ -274,6 +276,7 @@ class MexcClient:
         if session is None:
             session = requests.Session()
             session.trust_env = False
+            session.cookies = _DropCookies()
             self._local.session = session
         return session
 
@@ -368,22 +371,23 @@ def rank_liquid(
 
     if not isinstance(payload, list):
         raise MexcError("24h ticker is not a list")
-    if cap < 1:
+    bounds = (min_quote_micro, change_min_bps, change_max_bps, cap)
+    if any(isinstance(item, bool) or not isinstance(item, int) for item in bounds) or cap < 1:
         return []
     best: dict[str, int] = {}
     for item in payload:
         if not isinstance(item, dict):
             continue
-        symbol = str(item.get("symbol") or "")
-        if not usdt_symbol_ok(symbol):
+        symbol = item.get("symbol")
+        if not isinstance(symbol, str) or not usdt_symbol_ok(symbol):
             continue
         raw_quote = item.get("quoteVolume")
         raw_change = item.get("priceChangePercent")
         if raw_quote in (None, "") or raw_change in (None, ""):
             continue
         try:
-            quote = parse_micro(str(raw_quote))
-            change_bps = DecimalChange(str(raw_change))
+            quote = parse_micro(decimal_text(raw_quote))
+            change_bps = DecimalChange(decimal_text(raw_change))
         except (MoneyError, ValueError):
             continue
         if quote < min_quote_micro:
@@ -400,10 +404,11 @@ def ticker_price(payload: object, symbol: str) -> int:
     """Last price only when the row names the requested pair."""
     if not isinstance(payload, dict) or "price" not in payload:
         raise MexcError(f"no price for {symbol}")
-    if str(payload.get("symbol") or "") != symbol:
+    named = payload.get("symbol")
+    if not isinstance(named, str) or named != symbol:
         raise MexcError(f"price is not {symbol}")
     try:
-        return parse_price(str(payload["price"]))
+        return parse_price(decimal_text(payload["price"]))
     except MoneyError as exc:
         raise MexcError(f"bad price for {symbol}") from exc
 
@@ -413,7 +418,7 @@ def depth_notionals(payload: object, symbol: str) -> tuple[int, int]:
     if not isinstance(payload, dict):
         raise MexcError(f"no depth for {symbol}")
     named = payload.get("symbol")
-    if named not in (None, "") and str(named) != symbol:
+    if named not in (None, "") and (not isinstance(named, str) or named != symbol):
         raise MexcError(f"depth is not {symbol}")
     bids = _depth_side(payload.get("bids"))
     asks = _depth_side(payload.get("asks"))
@@ -430,7 +435,9 @@ def _reject_exchange_code(body: dict[str, Any]) -> None:
     if "code" not in body:
         return
     code = body.get("code")
-    if code in (0, 200, "0", "200"):
+    if code in (0, 200) and isinstance(code, int) and not isinstance(code, bool):
+        return
+    if code in ("0", "200"):
         return
     msg = str(body.get("msg") or body.get("message") or code)
     text = f"exchange code {code}: {msg[:180]}"
@@ -445,7 +452,23 @@ def _raise_limited(label: str, status: int, retry_after: str) -> None:
     raise MexcRateLimit(f"{label} HTTP {status} retry-after={shown}", seconds)
 
 
+_MAX_BODY = 8_000_000
+
+
+class _DropCookies(requests.cookies.RequestsCookieJar):
+    """Do not store or send cookies. A Set-Cookie must not ride with the API key."""
+
+    def extract_cookies(self, response, request):  # noqa: ANN001
+        return None
+
+    def set_cookie(self, cookie, *args, **kwargs):  # noqa: ANN001
+        return None
+
+
 def _json_body(response: requests.Response, label: str) -> Any:
+    payload = getattr(response, "content", b"")
+    if isinstance(payload, (bytes, bytearray)) and len(payload) > _MAX_BODY:
+        raise MexcError(f"{label} response is too large")
     try:
         return response.json()
     except ValueError as exc:
@@ -472,8 +495,8 @@ def _depth_side(levels: object) -> list[tuple[int, int]]:
         if not isinstance(level, list) or len(level) < 2:
             raise MexcError("depth level is incomplete")
         try:
-            price = parse_price(str(level[0]))
-            qty_micro = parse_micro_nonneg(str(level[1]))
+            price = parse_price(decimal_text(level[0]))
+            qty_micro = parse_micro_nonneg(decimal_text(level[1]))
         except MoneyError as exc:
             raise MexcError("depth level is not decimal") from exc
         if qty_micro <= 0:
@@ -525,7 +548,8 @@ def book_prices(payload: object, symbol: str) -> tuple[int, int]:
         raise MexcError(f"empty book for {symbol}")
     if ask < bid:
         raise MexcError(f"crossed book for {symbol}")
-    if str(payload.get("symbol") or "") != symbol:
+    named = payload.get("symbol")
+    if not isinstance(named, str) or named != symbol:
         raise MexcError(f"book ticker is not {symbol}")
     return bid, ask
 
@@ -534,8 +558,13 @@ def _size_ok(raw: object) -> bool:
     """True when the book shows a positive size. Zero is an empty level."""
     from decimal import Decimal, InvalidOperation
 
-    text = str(raw).strip()
-    if text == "" or decimal_zero(text):
+    if raw in (None, ""):
+        return False
+    try:
+        text = decimal_text(raw)
+    except MoneyError as exc:
+        raise MexcError("book size is not decimal") from exc
+    if decimal_zero(text):
         return False
     try:
         return Decimal(text) > 0
@@ -543,8 +572,16 @@ def _size_ok(raw: object) -> bool:
         raise MexcError("book size is not decimal") from exc
 
 
+def _public_limit(limit: int, label: str) -> None:
+    """A public request limit is a positive integer. A fraction is not sent."""
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+        raise MexcError(f"{label} limit is not an integer")
+
+
 def parse_klines(symbol: str, payload: object, span_ms: int | None = None) -> list[tuple[int, int, int, int, int]]:
     """Open, high, low, close, and quote volume. A broken candle is refused."""
+    if span_ms is not None and (isinstance(span_ms, bool) or not isinstance(span_ms, int) or span_ms < 1):
+        raise MexcError(f"kline interval for {symbol} is not the one requested")
     if not isinstance(payload, list) or len(payload) < 2:
         raise MexcError(f"no klines for {symbol}")
     rows: list[tuple[int, int, int, int, int]] = []
@@ -565,14 +602,15 @@ def parse_klines(symbol: str, payload: object, span_ms: int | None = None) -> li
         previous_close = closed_at
         previous_span = span
         try:
-            open_px = parse_price(str(row[1]))
-            high = parse_price(str(row[2]))
-            low = parse_price(str(row[3]))
-            close = parse_price(str(row[4]))
-            quote = parse_micro_nonneg(str(row[7]))
+            open_px = parse_price(decimal_text(row[1]))
+            high = parse_price(decimal_text(row[2]))
+            low = parse_price(decimal_text(row[3]))
+            close = parse_price(decimal_text(row[4]))
+            base_vol = parse_micro_nonneg(decimal_text(row[5]))
+            quote = parse_micro_nonneg(decimal_text(row[7]))
         except MoneyError as exc:
             raise MexcError(f"bad kline number for {symbol}") from exc
-        if quote <= 0:
+        if quote <= 0 or base_vol <= 0:
             raise MexcError(f"kline volume for {symbol} is zero")
         if min(open_px, high, low, close) <= 0 or low > high or open_px < low or open_px > high or close < low or close > high:
             raise MexcError(f"kline range for {symbol} is impossible")
@@ -591,8 +629,10 @@ def _decimal_zero(text: str) -> bool:
 
 
 def _book_side(raw: object) -> int:
-    text = str(raw).strip()
-    if text == "" or _decimal_zero(text):
+    if raw in (None, ""):
+        return 0
+    text = decimal_text(raw)
+    if _decimal_zero(text):
         return 0
     return parse_price(text)
 
@@ -618,16 +658,21 @@ def executed_fill(body: dict[str, Any]) -> tuple[int, int, int] | None:
     that is not a decimal, or a zero quote beside it, is an error: that is not
     an empty fill.
     """
-    executed = str(body.get("executedQty") or "")
-    text = executed.strip()
+    executed = body.get("executedQty")
+    if executed in (None, ""):
+        return None
+    try:
+        text = decimal_text(executed)
+    except MoneyError as exc:
+        raise MexcError("filled quantity is not decimal") from exc
     if text == "" or _decimal_zero(text):
         return None
     raw = body.get("cummulativeQuoteQty") or body.get("cumulativeQuoteQty")
-    base = _base_atoms(executed)
+    base = _base_atoms(text)
     if raw in (None, ""):
         raise MexcError("executed order is missing quote qty")
     try:
-        quote = parse_micro(str(raw))
+        quote = parse_micro(decimal_text(raw))
     except MoneyError as exc:
         raise MexcError("executed order quote is not decimal") from exc
     if quote <= 0:
@@ -647,6 +692,32 @@ def quantities_from_order(body: dict[str, Any]) -> tuple[int, int, int]:
     return got
 
 
+def _filled_base_text(body: dict[str, Any], label: str) -> str:
+    """Executed base as decimal text. A JSON float is not a fill."""
+    raw = body.get("executedQty")
+    if raw in (None, ""):
+        raise MexcError(f"{label} returned no executedQty")
+    try:
+        text = decimal_text(raw)
+    except MoneyError as exc:
+        raise MexcError(f"{label} executedQty is not decimal") from exc
+    if _decimal_zero(text):
+        raise MexcError(f"{label} returned no executedQty")
+    return text
+
+
+def _order_id_text(raw: object) -> str:
+    """Digit order id. A JSON float is not an id. An empty ack id stays empty."""
+    if raw in (None, ""):
+        return ""
+    if isinstance(raw, bool) or isinstance(raw, float):
+        raise MexcError("order id is not digits")
+    text = str(raw) if isinstance(raw, int) else raw.strip() if isinstance(raw, str) else ""
+    if not text.isdigit() or not 1 <= len(text) <= 32:
+        raise MexcError("order id is not digits")
+    return text
+
+
 def _require_filled(body: dict[str, Any], label: str) -> None:
     status = str(body.get("status") or "")
     if status not in ("FILLED", "2"):
@@ -659,7 +730,7 @@ def _filled_quote(body: dict[str, Any], label: str) -> int:
     if raw in (None, ""):
         raise MexcError(f"{label} has no quote qty")
     try:
-        quote = parse_micro(str(raw))
+        quote = parse_micro(decimal_text(raw))
     except MoneyError as exc:
         raise MexcError(f"{label} quote is not decimal") from exc
     if quote <= 0:
@@ -681,7 +752,10 @@ def ack_commission(body: dict[str, Any], base_asset: str) -> tuple[int, int]:
     commission = body.get("commission")
     if commission in (None, ""):
         return 0, 0
-    raw = str(commission).strip()
+    try:
+        raw = decimal_text(commission)
+    except MoneyError as exc:
+        raise MexcError("ack commission is not decimal") from exc
     if raw in ("", "0", "0.0", "0.00") or decimal_zero(raw):
         return 0, 0
     asset = str(body.get("commissionAsset") or "").upper()
@@ -717,6 +791,8 @@ def _sell_credit(body: dict[str, Any], base_asset: str) -> tuple[int, int, int]:
 
 def parse_account(payload: dict[str, Any]) -> tuple[int, int, dict[str, int], dict[str, int]]:
     """Total USDT, free USDT, total base atoms, and free base atoms."""
+    if not isinstance(payload, dict):
+        raise MexcError("account balances missing")
     rows = payload.get("balances")
     if not isinstance(rows, list):
         raise MexcError("account balances missing")
@@ -757,6 +833,6 @@ def _qty_micro(raw: object) -> int:
     if raw in (None, ""):
         return 0
     try:
-        return to_satoshi(str(raw))
+        return to_satoshi(decimal_text(raw))
     except MoneyError as exc:
-        raise MexcError(f"balance is not decimal: {raw}") from exc
+        raise MexcError("balance is not decimal") from exc

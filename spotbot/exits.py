@@ -7,7 +7,7 @@ from __future__ import annotations
 
 
 def pnl_bps(entry: int, price: int) -> int:
-    if entry <= 0 or price <= 0:
+    if isinstance(entry, bool) or isinstance(price, bool) or not isinstance(entry, int) or not isinstance(price, int) or entry <= 0 or price <= 0:
         raise ValueError("entry and price must be positive")
     return (price - entry) * 10_000 // entry
 
@@ -21,7 +21,8 @@ def exit_reason(
     trail_arm_bps: int,
     trail_gap_bps: int,
 ) -> str | None:
-    if min(stop_bps, take_bps, trail_arm_bps, trail_gap_bps) <= 0:
+    nums = (entry, price, peak, stop_bps, take_bps, trail_arm_bps, trail_gap_bps)
+    if any(isinstance(item, bool) or not isinstance(item, int) for item in nums) or min(stop_bps, take_bps, trail_arm_bps, trail_gap_bps) <= 0:
         raise ValueError("exit percents must be positive")
     profit = pnl_bps(entry, price)
     peak_profit = pnl_bps(entry, max(peak, price))

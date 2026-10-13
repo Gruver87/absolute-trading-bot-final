@@ -50,6 +50,14 @@ def snapshot(data_dir: Path, port: int = DEFAULT_PORT) -> dict[str, object]:
             if not path.exists():
                 continue
             key = name if folder == "" else f"{folder}/{name}"
+            try:
+                too_big = path.stat().st_size > 1_000_000
+            except OSError:
+                books[key] = {"error": "book is not json"}
+                continue
+            if too_big:
+                books[key] = {"error": "book file is too large"}
+                continue
             loaded = _read_json(path)
             if not isinstance(loaded, dict):
                 books[key] = {"error": "book is not json"}
@@ -149,7 +157,7 @@ def _read_json(path: Path) -> object | None:
     """None when the file cannot be read. One bad file must not blank the page."""
     try:
         return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
+    except (OSError, UnicodeError, json.JSONDecodeError, MemoryError):
         return None
 
 
@@ -169,15 +177,34 @@ def _heartbeat(data_dir: Path) -> dict[str, object] | None:
         age = int((datetime.now().astimezone() - then).total_seconds())
     except (TypeError, ValueError, OverflowError):
         return None
-    return {"at": loaded["at"], "book": loaded.get("book") or "", "age_sec": max(age, 0)}
+    if age < 0:
+        return None
+    return {"at": loaded["at"], "book": loaded.get("book") or "", "age_sec": age}
 
 
 def _quotes(data_dir: Path) -> dict[str, object]:
     path = data_dir / "ops_quotes.json"
     if not path.exists():
         return {}
+    try:
+        if path.stat().st_size > 1_000_000:
+            return {}
+    except OSError:
+        return {}
     loaded = _read_json(path)
     return loaded if isinstance(loaded, dict) else {}
+
+
+def _tail_text(path: Path, limit: int) -> str:
+    """The end of a journal. A long file is not loaded whole into the page."""
+    size = path.stat().st_size
+    with path.open("rb") as handle:
+        if size > limit:
+            handle.seek(size - limit)
+        raw = handle.read().decode("utf-8", errors="replace")
+    if size > limit:
+        raw = raw.split("\n", 1)[-1]
+    return raw
 
 
 def _events(data_dir: Path) -> list[object]:
@@ -185,7 +212,11 @@ def _events(data_dir: Path) -> list[object]:
     if not path.exists():
         return []
     rows: list[object] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    try:
+        text = _tail_text(path, 65_536)
+    except OSError:
+        return []
+    for line in text.splitlines():
         if not line.strip():
             continue
         try:
@@ -200,7 +231,10 @@ def _events(data_dir: Path) -> list[object]:
 def _log_tail(path: Path) -> list[str]:
     if not path.exists():
         return []
-    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    try:
+        lines = _tail_text(path, 65_536).splitlines()
+    except OSError:
+        return []
     kept = [line for line in lines if _safe_log(line)]
     return kept[-40:]
 
@@ -261,6 +295,11 @@ async function tick() {
   document.getElementById("events").innerHTML = renderEvents(data.events || []);
   document.getElementById("log").textContent = (data.log || []).join("\\n") || "пусто";
 }
+function esc(value) {
+  return String(value == null ? "" : value).replace(/[&<>"']/g, function (ch) {
+    return {"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[ch];
+  });
+}
 function renderBooks(books) {
   const names = Object.keys(books);
   if (!names.length) return "<tbody><tr><td>нет книг</td></tr></tbody>";
@@ -268,12 +307,12 @@ function renderBooks(books) {
   for (const name of names) {
     const book = books[name];
     if (name === "treasury") {
-      html += "<tr><td>treasury</td><td colspan='4'>уже разделено " + usdt(book.funded_micro) + "</td></tr>";
+      html += "<tr><td>treasury</td><td colspan='4'>уже разделено " + esc(usdt(book.funded_micro)) + "</td></tr>";
       continue;
     }
-    const pos = (book.positions || []).map(p => p.symbol + " @ " + shown(p.entry_micro)).join(", ") || "—";
-    html += "<tr><td>" + name + "</td><td>" + usdt(book.cash_micro) + "</td><td>" + usdt(book.realized_micro) +
-      "</td><td>" + usdt(book.fees_micro) + "</td><td>" + pos + "</td></tr>";
+    const pos = (book.positions || []).map(p => esc(p.symbol) + " @ " + esc(shown(p.entry_micro))).join(", ") || "—";
+    html += "<tr><td>" + esc(name) + "</td><td>" + esc(usdt(book.cash_micro)) + "</td><td>" + esc(usdt(book.realized_micro)) +
+      "</td><td>" + esc(usdt(book.fees_micro)) + "</td><td>" + pos + "</td></tr>";
   }
   return html + "</tbody>";
 }
@@ -283,8 +322,8 @@ function renderQuotes(quotes) {
   let html = "<thead><tr><th>пара</th><th>MEXC</th><th>Binance</th><th>Bybit</th><th>OKX</th><th>lag</th><th>ширина</th><th>когда</th></tr></thead><tbody>";
   for (const name of names) {
     const q = quotes[name];
-    html += "<tr><td>" + name + "</td><td>" + q.mexc + "</td><td>" + q.binance + "</td><td>" + q.bybit +
-      "</td><td>" + q.okx + "</td><td>" + q.lag_bps + "</td><td>" + q.width_bps + "</td><td>" + q.at + "</td></tr>";
+    html += "<tr><td>" + esc(name) + "</td><td>" + esc(q.mexc) + "</td><td>" + esc(q.binance) + "</td><td>" + esc(q.bybit) +
+      "</td><td>" + esc(q.okx) + "</td><td>" + esc(q.lag_bps) + "</td><td>" + esc(q.width_bps) + "</td><td>" + esc(q.at) + "</td></tr>";
   }
   return html + "</tbody>";
 }
@@ -292,8 +331,8 @@ function renderEvents(events) {
   if (!events.length) return "<tbody><tr><td>сделок нет</td></tr></tbody>";
   let html = "<thead><tr><th>когда</th><th>книга</th><th>что</th><th>пара</th><th>цена</th><th>причина</th></tr></thead><tbody>";
   for (const ev of events.slice().reverse()) {
-    html += "<tr><td>" + (ev.at || "") + "</td><td>" + (ev.book || "") + "</td><td>" + (ev.kind || "") +
-      "</td><td>" + (ev.symbol || "") + "</td><td>" + (ev.price || "") + "</td><td>" + (ev.reason || "") + "</td></tr>";
+    html += "<tr><td>" + esc(ev.at) + "</td><td>" + esc(ev.book) + "</td><td>" + esc(ev.kind) +
+      "</td><td>" + esc(ev.symbol) + "</td><td>" + esc(ev.price) + "</td><td>" + esc(ev.reason) + "</td></tr>";
   }
   return html + "</tbody>";
 }

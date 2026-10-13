@@ -11,10 +11,21 @@ import threading
 
 import requests
 
-from spotbot.money import MoneyError, parse_price
+from spotbot.money import MoneyError, decimal_text, parse_price
 
 LOG = logging.getLogger("spotbot.oracle")
 _LOCAL = threading.local()
+_MAX_BODY = 8_000_000
+
+
+class _DropCookies(requests.cookies.RequestsCookieJar):
+    """Do not keep cookies from a public price host."""
+
+    def extract_cookies(self, response, request):  # noqa: ANN001
+        return None
+
+    def set_cookie(self, cookie, *args, **kwargs):  # noqa: ANN001
+        return None
 
 # Do not buy when MEXC is this far richer than the other books.
 BUY_MAX_AHEAD_BPS = 15
@@ -26,6 +37,11 @@ MAX_WIDTH_BPS = 30
 
 class OracleError(RuntimeError):
     """A venue returned nothing usable."""
+
+
+def _price_ok(price: int) -> bool:
+    """A bool is not a price of one. It is left out of the width and the lag."""
+    return not isinstance(price, bool) and isinstance(price, int) and price > 0
 
 
 def _lower_middle(ordered: list[int]) -> int:
@@ -41,7 +57,7 @@ def deviation_bps(prices: list[int]) -> int | None:
 
     An even count uses the lower middle price, so the width is not understated.
     """
-    vals = [price for price in prices if price > 0]
+    vals = [price for price in prices if _price_ok(price)]
     if len(vals) < 2:
         return None
     ordered = sorted(vals)
@@ -56,8 +72,8 @@ def lag_bps(mexc_micro: int, peers: list[int]) -> int | None:
 
     Positive means MEXC is richer. None when there is no other price.
     """
-    vals = [price for price in peers if price > 0]
-    if mexc_micro <= 0 or not vals:
+    vals = [price for price in peers if _price_ok(price)]
+    if not _price_ok(mexc_micro) or not vals:
         return None
     ordered = sorted(vals)
     mid = _lower_middle(ordered)
@@ -68,7 +84,12 @@ def lag_bps(mexc_micro: int, peers: list[int]) -> int | None:
 
 def cheapest_first(rows: list[tuple[str, int]]) -> list[str]:
     """Order symbols by lag. A lower lag means MEXC is cheaper. Ties follow the name."""
-    return [symbol for symbol, _lag in sorted(rows, key=lambda row: (row[1], row[0]))]
+    clean = [
+        (symbol, lag)
+        for symbol, lag in rows
+        if isinstance(symbol, str) and not isinstance(lag, bool) and isinstance(lag, int)
+    ]
+    return [symbol for symbol, _lag in sorted(clean, key=lambda row: (row[1], row[0]))]
 
 
 def entry_allowed(mexc_micro: int, peers: list[int]) -> bool:
@@ -82,6 +103,8 @@ def entry_allowed(mexc_micro: int, peers: list[int]) -> bool:
 
 def ahead_exit(mexc_micro: int, peers: list[int], profit_bps: int) -> bool:
     """True when a profitable MEXC position is richer than the other books."""
+    if isinstance(profit_bps, bool) or not isinstance(profit_bps, int):
+        return False
     lag = lag_bps(mexc_micro, peers)
     if lag is None:
         return False
@@ -99,6 +122,7 @@ def venue_quotes(symbol: str, timeout_sec: int = 5) -> dict[str, int]:
     if session is None:
         session = requests.Session()
         session.trust_env = False
+        session.cookies = _DropCookies()
         _LOCAL.session = session
     okx = _okx_inst(symbol)
     found: dict[str, int] = {}
@@ -135,11 +159,15 @@ def venue_quotes(symbol: str, timeout_sec: int = 5) -> dict[str, int]:
         if response.status_code != 200:
             LOG.warning("oracle %s %s HTTP %s", label, symbol, response.status_code)
             continue
+        payload = getattr(response, "content", b"")
+        if isinstance(payload, (bytes, bytearray)) and len(payload) > _MAX_BODY:
+            LOG.warning("oracle %s %s response is too large", label, symbol)
+            continue
         try:
             raw = pick(response.json())
             if raw is None:
                 continue
-            found[label] = parse_price(str(raw))
+            found[label] = parse_price(raw if isinstance(raw, str) else decimal_text(raw))
         except (MoneyError, ValueError, TypeError) as exc:
             LOG.warning("oracle %s %s parse: %s", label, symbol, exc)
     return found
@@ -154,8 +182,7 @@ def _okx_inst(symbol: str) -> str | None:
 def _binance_price(body: object, symbol: str) -> str | None:
     if not isinstance(body, dict) or str(body.get("symbol") or "") != symbol:
         return None
-    last = body.get("price")
-    return str(last) if last else None
+    return _price_text(body.get("price"))
 
 
 def _bybit_price(body: object, symbol: str) -> str | None:
@@ -169,8 +196,7 @@ def _bybit_price(body: object, symbol: str) -> str | None:
         return None
     if str(rows[0].get("symbol") or "") != symbol:
         return None
-    last = rows[0].get("lastPrice")
-    return str(last) if last else None
+    return _price_text(rows[0].get("lastPrice"))
 
 
 def _okx_price(body: object, inst_id: str) -> str | None:
@@ -181,5 +207,14 @@ def _okx_price(body: object, inst_id: str) -> str | None:
         return None
     if str(rows[0].get("instId") or "") != inst_id:
         return None
-    last = rows[0].get("last")
-    return str(last) if last else None
+    return _price_text(rows[0].get("last"))
+
+
+def _price_text(raw: object) -> str | None:
+    """A peer price is decimal text. A JSON float is omitted, not parsed."""
+    if raw in (None, ""):
+        return None
+    try:
+        return decimal_text(raw)
+    except MoneyError:
+        return None

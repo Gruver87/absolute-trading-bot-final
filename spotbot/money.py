@@ -21,6 +21,30 @@ class MoneyError(ValueError):
     """Rejected amount."""
 
 
+def decimal_text(raw: object) -> str:
+    """A decimal the exchange sent as text. A JSON float is binary and is refused.
+
+    An int is exact, so it is accepted. A bool is not an int here. An exponent
+    is not a decimal: ``1e-7`` is not a price.
+    """
+    if isinstance(raw, bool) or isinstance(raw, float):
+        raise MoneyError("float and bool amounts are refused")
+    if isinstance(raw, int):
+        return str(raw)
+    if not isinstance(raw, str):
+        raise MoneyError(f"amount must be a decimal string, got {type(raw).__name__}")
+    return _plain_decimal(raw)
+
+
+def _plain_decimal(text: str) -> str:
+    raw = text.strip()
+    if not raw:
+        raise MoneyError("empty amount")
+    if any(ch in raw for ch in "eE"):
+        raise MoneyError("exponent is not a decimal")
+    return raw
+
+
 def to_satoshi(amount: object) -> int:
     """Floor a decimal string to integer satoshi. Float and bool are refused."""
     if isinstance(amount, bool) or isinstance(amount, float):
@@ -29,9 +53,7 @@ def to_satoshi(amount: object) -> int:
         return amount
     if not isinstance(amount, str):
         raise MoneyError(f"amount must be a decimal string, got {type(amount).__name__}")
-    raw = amount.strip()
-    if not raw:
-        raise MoneyError("empty amount")
+    raw = _plain_decimal(amount)
     try:
         value = Decimal(raw)
     except (InvalidOperation, ValueError) as exc:
@@ -59,7 +81,7 @@ def parse_micro_nonneg(text: str) -> int:
 
 def format_fixed(amount: int, scale: int) -> str:
     """Render an integer scaled amount without binary float."""
-    if isinstance(amount, bool) or amount < 0 or scale <= 1:
+    if isinstance(amount, bool) or isinstance(scale, bool) or not isinstance(amount, int) or not isinstance(scale, int) or amount < 0 or scale <= 1:
         raise MoneyError("wire amount must be a non-negative int")
     digits = 0
     rest = scale
@@ -72,6 +94,8 @@ def format_fixed(amount: int, scale: int) -> str:
 
 
 def format_usdt(micro: int) -> str:
+    if isinstance(micro, bool) or not isinstance(micro, int):
+        raise MoneyError("usdt amount must be an integer")
     sign = "-" if micro < 0 else ""
     whole, frac = divmod(abs(int(micro)), SATOSHI_MULTIPLIER)
     return f"{sign}{whole}.{frac:06d}"
@@ -81,9 +105,7 @@ def parse_price(text: str) -> int:
     """Price of one coin in 1e-12 USDT. Floors. Float and bool are refused."""
     if isinstance(text, bool) or isinstance(text, float) or not isinstance(text, str):
         raise MoneyError("price must be a decimal string")
-    raw = text.strip()
-    if not raw:
-        raise MoneyError("empty price")
+    raw = _plain_decimal(text)
     try:
         value = Decimal(raw)
     except (InvalidOperation, ValueError) as exc:
@@ -101,7 +123,7 @@ def decimal_zero(text: str) -> bool:
     if not isinstance(text, str):
         return False
     raw = text.strip()
-    if not raw:
+    if not raw or any(ch in raw for ch in "eE"):
         return False
     try:
         return Decimal(raw) == 0
@@ -118,7 +140,7 @@ def format_price(price: int) -> str:
 
 def notional_micro(base_atoms: int, price: int) -> int:
     """Quote cash for a coin amount at this price. Both must be integers."""
-    if isinstance(base_atoms, bool) or isinstance(price, bool):
+    if isinstance(base_atoms, bool) or isinstance(price, bool) or not isinstance(base_atoms, int) or not isinstance(price, int):
         raise MoneyError("notional refuses a bool")
     if base_atoms < 0 or price <= 0:
         raise MoneyError("notional needs a positive price and a base that is not negative")
@@ -127,13 +149,13 @@ def notional_micro(base_atoms: int, price: int) -> int:
 
 def base_for_quote(quote_micro: int, price: int) -> int:
     """Base atoms bought by quote_micro at this price, before the lot step."""
-    if quote_micro <= 0 or price <= 0:
+    if isinstance(quote_micro, bool) or isinstance(price, bool) or not isinstance(quote_micro, int) or not isinstance(price, int) or quote_micro <= 0 or price <= 0:
         return 0
     return quote_micro * _PRICE_PER_MICRO * BASE_ATOMS // price
 
 
 def implied_price_micro(quote_micro: int, base_atoms: int) -> int:
     """Average fill in the price scale. Not the ticker before the order."""
-    if quote_micro <= 0 or base_atoms <= 0:
+    if isinstance(quote_micro, bool) or isinstance(base_atoms, bool) or not isinstance(quote_micro, int) or not isinstance(base_atoms, int) or quote_micro <= 0 or base_atoms <= 0:
         raise MoneyError("fill price needs a positive quote and base")
     return quote_micro * _PRICE_PER_MICRO * BASE_ATOMS // base_atoms

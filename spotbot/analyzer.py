@@ -48,6 +48,9 @@ def score(
     ask: int,
 ) -> int:
     """Return 0 when the setup is refused, else a score in basis points of confidence."""
+    nums = (volume_bps, close_pos_bps, oracle_dev_bps, rsi_value, bid, ask)
+    if any(isinstance(item, bool) or not isinstance(item, int) for item in nums):
+        return 0
     lib = _load()
     if lib is not None:
         return int(
@@ -71,6 +74,9 @@ def _score_python(
     bid: int,
     ask: int,
 ) -> int:
+    nums = (volume_bps, close_pos_bps, oracle_dev_bps, rsi_value, bid, ask)
+    if any(isinstance(item, bool) or not isinstance(item, int) for item in nums):
+        return 0
     if bid <= 0 or ask < 0 or ask >= bid:
         return 0
     if volume_bps < 20_000 or close_pos_bps < 6_500:

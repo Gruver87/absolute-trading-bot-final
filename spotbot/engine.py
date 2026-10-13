@@ -59,6 +59,7 @@ from spotbot.state import (
     bind_ledger,
     clear_pending,
     exchange_order_id_ok,
+    LedgerError,
     load_book,
     record_buy,
     record_sell_fill,
@@ -94,9 +95,10 @@ def run_cycle(
     name = book_name or path.stem
     clock_ok = _clock_ok(client) if cfg.live else True
     other_pending = sibling_pending(sibling_paths) if cfg.live else None
+    known_order = other_pending is not None and " pending " in other_pending
     if other_pending:
-        LOG.warning("sibling order blocks this book: %s", other_pending)
-    orders_allowed = clock_ok and other_pending is None
+        LOG.warning("sibling book blocks entries: %s", other_pending)
+    orders_allowed = clock_ok and not known_order
     exits, entries, skipped = 0, 0, 0
     marks: dict[str, int] = {}
     unmarked: tuple[str, ...] = ()
@@ -137,7 +139,7 @@ def run_cycle(
                 "entries off book=%s: the measured rule does not beat fees and the spread",
                 name,
             )
-        if halt or conflict or pending_problem or cooled or not orders_allowed or not cfg.entries:
+        if halt or conflict or pending_problem or cooled or other_pending or not orders_allowed or not cfg.entries:
             entries, skipped = 0, 0
         else:
             deadline = time.monotonic() + CYCLE_BUDGET_SEC
@@ -237,6 +239,8 @@ def _unseen(book: Book, now: int, interval_sec: int) -> bool:
 
     A missing stamp is not a gap: the book has never been marked.
     """
+    if isinstance(book.seen_at, bool) or not isinstance(book.seen_at, int) or isinstance(now, bool) or not isinstance(now, int) or isinstance(interval_sec, bool) or not isinstance(interval_sec, int):
+        return True
     if book.seen_at <= 0:
         return False
     if book.seen_at > now:
@@ -326,6 +330,7 @@ def _close_positions(
             continue
         marks[pos.symbol] = price
         armed = pos.hold_flat or _unseen(book, _now_sec(), cfg.interval_sec)
+        started_peak = pos.peak_micro
         if _gap_hold(cfg, client, book, pos, price):
             kept.append(pos)
             continue
@@ -362,13 +367,15 @@ def _close_positions(
         if bad_mark:
             if armed:
                 pos.hold_flat = True
+                pos.peak_micro = started_peak
                 LOG.warning("gap hold %s, the confirm bid is unreadable", pos.symbol)
             LOG.warning("price refused, position kept: %s", pos.symbol)
             unmarked.append(pos.symbol)
             kept.append(pos)
             continue
         if fresh_reason is None:
-            _rearm_if_under(client, pos, fresh_bid, armed)
+            if _rearm_if_under(client, pos, fresh_bid, armed):
+                pos.peak_micro = started_peak
             LOG.info("exit cancelled, the next bid no longer exits %s", pos.symbol)
             kept.append(pos)
             continue
@@ -376,6 +383,7 @@ def _close_positions(
         price = fresh_bid
         marks[pos.symbol] = fresh_bid
         if _rearm_if_under(client, pos, price, armed):
+            pos.peak_micro = started_peak
             kept.append(pos)
             continue
         if cfg.live and not orders_allowed:
@@ -416,13 +424,15 @@ def _close_positions(
             if bad_mark:
                 if armed:
                     pos.hold_flat = True
+                    pos.peak_micro = started_peak
                     LOG.warning("gap hold %s, the confirm bid is unreadable", pos.symbol)
                 LOG.warning("price refused, position kept: %s", pos.symbol)
                 unmarked.append(pos.symbol)
                 kept.append(pos)
                 continue
             if fresh_reason is None:
-                _rearm_if_under(client, pos, fresh_bid, armed)
+                if _rearm_if_under(client, pos, fresh_bid, armed):
+                    pos.peak_micro = started_peak
                 LOG.info("exit cancelled, the next bid no longer exits %s", pos.symbol)
                 kept.append(pos)
                 continue
@@ -430,6 +440,7 @@ def _close_positions(
             price = fresh_bid
             marks[pos.symbol] = fresh_bid
             if _rearm_if_under(client, pos, price, armed):
+                pos.peak_micro = started_peak
                 kept.append(pos)
                 continue
             client_id = new_client_order_id(pos.symbol, "S")
@@ -529,13 +540,15 @@ def _close_positions(
         if bad_mark:
             if armed:
                 pos.hold_flat = True
+                pos.peak_micro = started_peak
                 LOG.warning("gap hold %s, the confirm bid is unreadable", pos.symbol)
             LOG.warning("price refused, position kept: %s", pos.symbol)
             unmarked.append(pos.symbol)
             kept.append(pos)
             continue
         if fresh_reason is None:
-            _rearm_if_under(client, pos, fresh_bid, armed)
+            if _rearm_if_under(client, pos, fresh_bid, armed):
+                pos.peak_micro = started_peak
             LOG.info("exit cancelled, the next bid no longer exits %s", pos.symbol)
             kept.append(pos)
             continue
@@ -543,6 +556,7 @@ def _close_positions(
         price = fresh_bid
         marks[pos.symbol] = fresh_bid
         if _rearm_if_under(client, pos, price, armed):
+            pos.peak_micro = started_peak
             kept.append(pos)
             continue
         credit, fee = paper_sell(sell_atoms, price, taker_bps)
@@ -797,7 +811,7 @@ def _try_buy(
     if book.pending_client_id:
         LOG.warning("pending %s blocks %s", book.pending_symbol, symbol)
         return False
-    if price <= 0 or any(pos.symbol == symbol for pos in book.positions):
+    if isinstance(price, bool) or not isinstance(price, int) or price <= 0 or any(pos.symbol == symbol for pos in book.positions):
         LOG.info("skip %s: already on the book or the price is not positive", symbol)
         return False
     if not price_grid_ok(price, _risk(cfg)[0]):
@@ -1087,6 +1101,8 @@ def _resolve_pending(client: MexcClient, book: Book, path: Path) -> str | None:
 
 def _over_request(book: Book, base_atoms: int, quote_micro: int) -> str | None:
     """Refuse a fill larger than the order we sent. The client id stays pending."""
+    if isinstance(base_atoms, bool) or not isinstance(base_atoms, int) or isinstance(quote_micro, bool) or not isinstance(quote_micro, int):
+        return "fill is not an integer"
     if book.pending_side == "BUY" and book.pending_quote_micro > 0 and quote_micro > book.pending_quote_micro:
         return "pending buy filled more quote than requested"
     if book.pending_side == "SELL" and book.pending_base_atoms > 0 and base_atoms > book.pending_base_atoms:
@@ -1184,7 +1200,10 @@ def sibling_pending(paths: tuple[Path, ...]) -> str | None:
     for path in paths:
         if not path.exists():
             continue
-        other = load_book(path, 0)
+        try:
+            other = load_book(path, 0)
+        except LedgerError:
+            return f"{path.stem} book is unreadable"
         if other.pending_client_id:
             return f"{path.stem} pending {other.pending_symbol or 'unknown'}"
     return None
@@ -1196,7 +1215,10 @@ def _sibling_positions(paths: tuple[Path, ...]) -> list[tuple[str, int]]:
     for path in paths:
         if not path.exists():
             continue
-        other = load_book(path, 0)
+        try:
+            other = load_book(path, 0)
+        except LedgerError as exc:
+            raise LedgerError(f"{path.stem} book is unreadable") from exc
         rows.extend((pos.symbol, pos.base_atoms) for pos in other.positions)
     return rows
 
@@ -1209,7 +1231,11 @@ def _account_conflict(client: MexcClient, book: Book, sibling_paths: tuple[Path,
     except MexcError as exc:
         return str(exc)
     positions = [(pos.symbol, pos.base_atoms) for pos in book.positions]
-    return inventory_mismatch(positions, bases, _sibling_positions(sibling_paths))
+    try:
+        elsewhere = _sibling_positions(sibling_paths)
+    except LedgerError as exc:
+        return str(exc)
+    return inventory_mismatch(positions, bases, elsewhere)
 
 
 def _exit_fees(client: MexcClient, book: Book) -> dict[str, int] | None:
@@ -1273,7 +1299,9 @@ def mark_stop_cooldown(
     """A stop blocks the next entry. Take-profit and trail do not. Repeated stops lock the pair."""
     if reason != "stop":
         return
-    if seconds > 0:
+    if isinstance(seconds, bool):
+        seconds = 86_400
+    if isinstance(seconds, int) and not isinstance(seconds, bool) and seconds > 0:
         book.cooldown_until = _now_sec() + seconds
     if symbol:
         note_pair_stop(book, symbol, _now_sec(), lock_count, lock_sec)
@@ -1289,14 +1317,18 @@ def open_loss_micro(
     loss = 0
     for pos in positions:
         price = marks.get(pos.symbol, 0)
-        if price <= 0 or pos.base_atoms <= 0:
+        if isinstance(pos.quote_micro, bool):
+            return 2**62
+        if not isinstance(price, bool) and not isinstance(price, int):
+            return 2**62
+        if isinstance(price, bool) or isinstance(pos.base_atoms, bool) or not isinstance(pos.base_atoms, int) or price <= 0 or pos.base_atoms <= 0:
             continue
         gross = notional_micro(pos.base_atoms, price)
         if taker_bps is None:
             value = gross
         else:
             bps = taker_bps.get(pos.symbol)
-            if bps is None:
+            if bps is None or isinstance(bps, bool):
                 continue
             credit, fee = paper_sell(pos.base_atoms, price, bps)
             if credit < 0 or fee < 0 or credit + fee != gross:
@@ -1334,6 +1366,10 @@ def _roll_guard(book: Book) -> None:
 
 def _entries_halted(book: Book, daily_loss_bps: int, open_loss: int = 0) -> bool:
     _roll_guard(book)
+    if isinstance(daily_loss_bps, bool) or not isinstance(daily_loss_bps, int) or isinstance(open_loss, bool) or not isinstance(open_loss, int):
+        return True
+    if isinstance(book.guard_cash_micro, bool) or not isinstance(book.guard_cash_micro, int) or isinstance(book.guard_realized_micro, bool) or not isinstance(book.guard_realized_micro, int) or isinstance(book.realized_micro, bool) or not isinstance(book.realized_micro, int):
+        return True
     if daily_loss_bps <= 0:
         return False
     drop = book.guard_realized_micro - book.realized_micro
