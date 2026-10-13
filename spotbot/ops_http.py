@@ -1,0 +1,256 @@
+"""Read-only ops page for the spot bot.
+
+Binds 127.0.0.1:19280. Ports 18180-18182 belong to the DUP mesh and are refused.
+The page does not send orders and does not read API keys.
+"""
+
+from __future__ import annotations
+
+import json
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+MESH_PORTS = frozenset({18180, 18181, 18182})
+DEFAULT_PORT = 19280
+
+_HIDDEN = ("api_key", "api_secret", "secret", "token", "password")
+
+
+class OpsError(RuntimeError):
+    """Refused ops bind."""
+
+
+def check_ops_port(port: int) -> None:
+    if port in MESH_PORTS:
+        raise OpsError(f"refusing port {port}: 18180-18182 is the DUP mesh")
+    if port < 1024 or port > 65535:
+        raise OpsError("ops port must be 1024..65535")
+
+
+def snapshot(data_dir: Path, port: int = DEFAULT_PORT) -> dict[str, object]:
+    """Public view of books, quotes, events, and the bot log."""
+    books: dict[str, object] = {}
+    names = ("sleeve_major", "sleeve_alt", "sleeve_meme", "book", "book_liquidity", "treasury")
+    for folder in ("", "paper", "live"):
+        base = data_dir if folder == "" else data_dir / folder
+        for name in names:
+            path = base / f"{name}.json"
+            if not path.exists():
+                continue
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            key = name if folder == "" else f"{folder}/{name}"
+            books[key] = _public(loaded)
+    return {
+        "bind": f"127.0.0.1:{port}",
+        "mesh_ports": "18180-18182",
+        "books": books,
+        "quotes": _quotes(data_dir),
+        "events": _events(data_dir),
+        "log": _log_tail(data_dir / "ops.log"),
+        "heartbeat": _heartbeat(data_dir),
+    }
+
+
+def serve(data_dir: Path, port: int = DEFAULT_PORT) -> None:
+    check_ops_port(port)
+    httpd = ThreadingHTTPServer(("127.0.0.1", port), _Handler)
+    httpd.data_dir = data_dir  # type: ignore[attr-defined]
+    httpd.serve_forever()
+
+
+class _Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def do_GET(self) -> None:  # noqa: N802
+        path = self.path.split("?", 1)[0]
+        if path == "/api/status":
+            data_dir = self.server.data_dir  # type: ignore[attr-defined]
+            port = int(self.server.server_address[1])
+            body = json.dumps(snapshot(data_dir, port), ensure_ascii=False).encode("utf-8")
+            self._send(200, "application/json; charset=utf-8", body)
+            return
+        if path in ("/", "/index.html"):
+            self._send(200, "text/html; charset=utf-8", _PAGE.encode("utf-8"))
+            return
+        self._send(404, "text/plain; charset=utf-8", b"not found")
+
+    def do_POST(self) -> None:  # noqa: N802
+        self._send(405, "text/plain; charset=utf-8", b"read only")
+
+    def log_message(self, fmt: str, *args: object) -> None:
+        return
+
+    def _send(self, code: int, content_type: str, body: bytes) -> None:
+        self.send_response(code)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def _public(value: object) -> object:
+    if isinstance(value, dict):
+        return {key: _public(item) for key, item in value.items() if not _hidden(str(key))}
+    if isinstance(value, list):
+        return [_public(item) for item in value]
+    return value
+
+
+def _hidden(key: str) -> bool:
+    low = key.lower()
+    return any(part in low for part in _HIDDEN)
+
+
+def _heartbeat(data_dir: Path) -> dict[str, object] | None:
+    path = data_dir / "ops_heartbeat.json"
+    if not path.exists():
+        return None
+    loaded = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(loaded, dict) or not loaded.get("at"):
+        return None
+    from datetime import datetime
+
+    then = datetime.fromisoformat(str(loaded["at"]))
+    age = int((datetime.now().astimezone() - then).total_seconds())
+    return {"at": loaded["at"], "book": loaded.get("book") or "", "age_sec": max(age, 0)}
+
+
+def _quotes(data_dir: Path) -> dict[str, object]:
+    path = data_dir / "ops_quotes.json"
+    if not path.exists():
+        return {}
+    loaded = json.loads(path.read_text(encoding="utf-8"))
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _events(data_dir: Path) -> list[object]:
+    path = data_dir / "ops_events.jsonl"
+    if not path.exists():
+        return []
+    rows: list[object] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        item = json.loads(line)
+        if isinstance(item, dict):
+            rows.append(_public(item))
+    return rows[-50:]
+
+
+def _log_tail(path: Path) -> list[str]:
+    if not path.exists():
+        return []
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    kept = [line for line in lines if _safe_log(line)]
+    return kept[-40:]
+
+
+def _safe_log(line: str) -> bool:
+    low = line.lower()
+    return "api_key" not in low and "api_secret" not in low and "telegram_token" not in low
+
+
+_PAGE = """<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DUP spot ops</title>
+<style>
+  body { margin: 0; font: 14px/1.4 ui-sans-serif, sans-serif; background: #121417; color: #e7e4dc; }
+  header, main { padding: 16px 20px; }
+  header { border-bottom: 1px solid #2a2e33; }
+  h1 { font-size: 18px; margin: 0 0 6px; }
+  h2 { font-size: 15px; margin: 18px 0 8px; }
+  p { margin: 0; color: #a8a294; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #2a2e33; vertical-align: top; }
+  th { color: #a8a294; font-weight: 600; }
+  .neg { color: #e07a72; }
+  pre { white-space: pre-wrap; background: #1b1e22; padding: 10px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Спот-бот, ops</h1>
+  <p id="bind">локальная страница, mesh не трогает</p>
+  <p id="beat">цикл ещё не завершался</p>
+</header>
+<main>
+  <h2>Книги</h2>
+  <table id="books"><tbody><tr><td>нет книг</td></tr></tbody></table>
+  <h2>Цены, последняя сверка</h2>
+  <table id="quotes"><tbody><tr><td>бот ещё не сверял</td></tr></tbody></table>
+  <h2>Сделки</h2>
+  <table id="events"><tbody><tr><td>сделок нет</td></tr></tbody></table>
+  <h2>Журнал</h2>
+  <pre id="log">пусто</pre>
+</main>
+<script>
+async function tick() {
+  const res = await fetch("/api/status", { cache: "no-store" });
+  const data = await res.json();
+  document.getElementById("bind").textContent =
+    "http://" + data.bind + "  ·  mesh " + data.mesh_ports + " не используется";
+  const beat = data.heartbeat;
+  document.getElementById("beat").textContent = beat
+    ? "последний цикл " + beat.book + " " + beat.at + " · " + beat.age_sec + " с назад"
+    : "цикл ещё не завершался";
+  document.getElementById("books").innerHTML = renderBooks(data.books || {});
+  document.getElementById("quotes").innerHTML = renderQuotes(data.quotes || {});
+  document.getElementById("events").innerHTML = renderEvents(data.events || []);
+  document.getElementById("log").textContent = (data.log || []).join("\\n") || "пусто";
+}
+function renderBooks(books) {
+  const names = Object.keys(books);
+  if (!names.length) return "<tbody><tr><td>нет книг</td></tr></tbody>";
+  let html = "<thead><tr><th>книга</th><th>USDT</th><th>результат</th><th>комиссия</th><th>позиции</th></tr></thead><tbody>";
+  for (const name of names) {
+    const book = books[name];
+    if (name === "treasury") {
+      html += "<tr><td>treasury</td><td colspan='4'>уже разделено " + usdt(book.funded_micro) + "</td></tr>";
+      continue;
+    }
+    const pos = (book.positions || []).map(p => p.symbol + " @ " + usdt(p.entry_micro)).join(", ") || "—";
+    html += "<tr><td>" + name + "</td><td>" + usdt(book.cash_micro) + "</td><td>" + usdt(book.realized_micro) +
+      "</td><td>" + usdt(book.fees_micro) + "</td><td>" + pos + "</td></tr>";
+  }
+  return html + "</tbody>";
+}
+function renderQuotes(quotes) {
+  const names = Object.keys(quotes);
+  if (!names.length) return "<tbody><tr><td>бот ещё не сверял</td></tr></tbody>";
+  let html = "<thead><tr><th>пара</th><th>MEXC</th><th>Binance</th><th>Bybit</th><th>OKX</th><th>lag</th><th>ширина</th><th>когда</th></tr></thead><tbody>";
+  for (const name of names) {
+    const q = quotes[name];
+    html += "<tr><td>" + name + "</td><td>" + q.mexc + "</td><td>" + q.binance + "</td><td>" + q.bybit +
+      "</td><td>" + q.okx + "</td><td>" + q.lag_bps + "</td><td>" + q.width_bps + "</td><td>" + q.at + "</td></tr>";
+  }
+  return html + "</tbody>";
+}
+function renderEvents(events) {
+  if (!events.length) return "<tbody><tr><td>сделок нет</td></tr></tbody>";
+  let html = "<thead><tr><th>когда</th><th>книга</th><th>что</th><th>пара</th><th>цена</th><th>причина</th></tr></thead><tbody>";
+  for (const ev of events.slice().reverse()) {
+    html += "<tr><td>" + (ev.at || "") + "</td><td>" + (ev.book || "") + "</td><td>" + (ev.kind || "") +
+      "</td><td>" + (ev.symbol || "") + "</td><td>" + (ev.price || "") + "</td><td>" + (ev.reason || "") + "</td></tr>";
+  }
+  return html + "</tbody>";
+}
+function usdt(micro) {
+  if (micro === undefined || micro === null) return "—";
+  const n = Number(micro);
+  const sign = n < 0 ? "-" : "";
+  const abs = Math.abs(n);
+  const whole = Math.floor(abs / 1000000);
+  const frac = String(abs % 1000000).padStart(6, "0");
+  return sign + whole + "." + frac;
+}
+tick();
+setInterval(tick, 3000);
+</script>
+</body>
+</html>
+"""

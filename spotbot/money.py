@@ -72,3 +72,10 @@ def format_usdt(micro: int) -> str:
     sign = "-" if micro < 0 else ""
     whole, frac = divmod(abs(int(micro)), SATOSHI_MULTIPLIER)
     return f"{sign}{whole}.{frac:06d}"
+
+
+def implied_price_micro(quote_micro: int, base_atoms: int) -> int:
+    """Average fill: quote spent divided by base received. Not the ticker before the order."""
+    if quote_micro <= 0 or base_atoms <= 0:
+        raise MoneyError("fill price needs a positive quote and base")
+    return quote_micro * BASE_ATOMS // base_atoms

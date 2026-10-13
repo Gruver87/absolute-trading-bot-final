@@ -27,10 +27,12 @@ class Config:
     trail_gap_bps: int
     live: bool
     mode: str
+    taker_bps: int
+    daily_loss_bps: int
+    stop_cooldown_sec: int
+    symbol_lock: bool
     api_key: str
     api_secret: str
-    telegram_token: str
-    telegram_chat_id: str
 
 
 def load_config(live_flag: bool, mode: str | None = None) -> Config:
@@ -55,6 +57,15 @@ def load_config(live_flag: bool, mode: str | None = None) -> Config:
     chosen = (mode or os.environ.get("SPOT_MODE", "rsi")).strip().lower()
     if chosen not in ("rsi", "liquidity"):
         raise ConfigError("SPOT_MODE must be rsi or liquidity")
+    taker_bps = int(os.environ.get("SPOT_TAKER_BPS", "5"))
+    if taker_bps < 0 or taker_bps > 100:
+        raise ConfigError("SPOT_TAKER_BPS must be 0..100")
+    daily_loss_bps = int(os.environ.get("SPOT_DAILY_LOSS_BPS", "500"))
+    if daily_loss_bps < 0 or daily_loss_bps > 10_000:
+        raise ConfigError("SPOT_DAILY_LOSS_BPS must be 0..10000")
+    stop_cooldown_sec = int(os.environ.get("SPOT_STOP_COOLDOWN_SEC", "900"))
+    if stop_cooldown_sec < 0 or stop_cooldown_sec > 86_400:
+        raise ConfigError("SPOT_STOP_COOLDOWN_SEC must be 0..86400")
     return Config(
         symbols=symbols,
         paper_cash_micro=parse_micro(os.environ.get("SPOT_PAPER_CASH_USDT", "1000")),
@@ -69,8 +80,10 @@ def load_config(live_flag: bool, mode: str | None = None) -> Config:
         trail_gap_bps=200,
         live=live,
         mode=chosen,
+        taker_bps=taker_bps,
+        daily_loss_bps=daily_loss_bps,
+        stop_cooldown_sec=stop_cooldown_sec,
+        symbol_lock=False,
         api_key=key,
         api_secret=secret,
-        telegram_token=os.environ.get("TELEGRAM_TOKEN", "").strip(),
-        telegram_chat_id=os.environ.get("TELEGRAM_CHAT_ID", "").strip(),
     )

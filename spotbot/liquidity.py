@@ -36,6 +36,25 @@ def close_position_bps(high: int, low: int, close: int) -> int | None:
     return (close - low) * 10_000 // span
 
 
+def candle_lift(
+    symbol: str,
+    quote_volumes: list[int],
+    high: int,
+    low: int,
+    close: int,
+    min_volume_bps: int = 20_000,
+    min_close_pos_bps: int = 6_500,
+) -> Lift | None:
+    """Volume and close location only. The live buy also requires the book."""
+    ratio = volume_ratio_bps(quote_volumes)
+    pos = close_position_bps(high, low, close)
+    if ratio is None or pos is None:
+        return None
+    if ratio < min_volume_bps or pos < min_close_pos_bps:
+        return None
+    return Lift(symbol, ratio, pos)
+
+
 def lift_signal(
     symbol: str,
     quote_volumes: list[int],
@@ -48,15 +67,20 @@ def lift_signal(
     min_close_pos_bps: int = 6_500,
 ) -> Lift | None:
     """BUY when the last closed bar expanded and buyers are still the larger side."""
-    ratio = volume_ratio_bps(quote_volumes)
-    pos = close_position_bps(high, low, close)
-    if ratio is None or pos is None:
-        return None
-    if ratio < min_volume_bps or pos < min_close_pos_bps:
+    found = candle_lift(
+        symbol,
+        quote_volumes,
+        high,
+        low,
+        close,
+        min_volume_bps,
+        min_close_pos_bps,
+    )
+    if found is None:
         return None
     if bid_micro <= 0 or bid_micro <= ask_micro:
         return None
-    return Lift(symbol, ratio, pos)
+    return found
 
 
 def ask_wall_exit(bid_micro: int, ask_micro: int, profit_bps: int, min_profit_bps: int = 30) -> bool:

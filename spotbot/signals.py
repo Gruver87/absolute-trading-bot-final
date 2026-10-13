@@ -82,6 +82,13 @@ class Entry:
     reason: str
 
 
+def closed_prices(prices: list[int]) -> list[int]:
+    """Drop the forming bar. MEXC klines end with the candle that is still open."""
+    if len(prices) < 2:
+        return []
+    return prices[:-1]
+
+
 def entry_signal(symbol: str, prices: list[int], rsi_buy: int) -> Entry | None:
     """BUY only on oversold RSI confirmed by Bollinger or a MACD buy cross."""
     value = rsi(prices)
