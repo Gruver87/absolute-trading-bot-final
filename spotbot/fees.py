@@ -6,7 +6,7 @@ does not add a second fee on top of an exchange debit.
 
 from __future__ import annotations
 
-from spotbot.money import base_for_quote, notional_micro
+from spotbot.money import MoneyError, _MAX_AMOUNT, base_for_quote, notional_micro
 
 STANDARD_TAKER_BPS = 5
 
@@ -19,7 +19,7 @@ def fee_on(notional_micro: int, taker_bps: int) -> int:
         or not isinstance(taker_bps, int)
     ):
         raise ValueError("notional and fee must be integers")
-    if notional_micro < 0 or taker_bps < 0:
+    if notional_micro < 0 or notional_micro >= _MAX_AMOUNT or taker_bps < 0 or taker_bps > 100:
         raise ValueError("notional and fee must be >= 0")
     return notional_micro * taker_bps // 10_000
 
@@ -35,7 +35,7 @@ def paper_buy(spend_micro: int, price_micro: int, taker_bps: int) -> tuple[int, 
         or not isinstance(taker_bps, int)
     ):
         return 0, 0
-    if price_micro <= 0 or spend_micro <= 0:
+    if price_micro <= 0 or spend_micro <= 0 or price_micro >= _MAX_AMOUNT or spend_micro >= _MAX_AMOUNT or taker_bps > 100:
         return 0, 0
     fee = fee_on(spend_micro, taker_bps)
     net = spend_micro - fee
@@ -55,8 +55,11 @@ def paper_sell(base_atoms: int, price_micro: int, taker_bps: int) -> tuple[int, 
         or not isinstance(taker_bps, int)
     ):
         return 0, 0
-    if base_atoms <= 0 or price_micro <= 0:
+    if base_atoms <= 0 or price_micro <= 0 or base_atoms >= _MAX_AMOUNT or price_micro >= _MAX_AMOUNT or taker_bps > 100:
         return 0, 0
-    gross = notional_micro(base_atoms, price_micro)
+    try:
+        gross = notional_micro(base_atoms, price_micro)
+    except MoneyError:
+        return 0, 0
     fee = fee_on(gross, taker_bps)
     return gross - fee, fee

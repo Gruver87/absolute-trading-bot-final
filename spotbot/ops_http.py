@@ -20,10 +20,12 @@ class OpsError(RuntimeError):
     """Refused ops bind."""
 
 
-def parse_ops_port(raw: str) -> int:
-    """A digit string only. A name or a fraction is not a port."""
+def parse_ops_port(raw: object) -> int:
+    """A short digit string only. A name, a fraction, or a huge integer is not a port."""
+    if not isinstance(raw, str):
+        raise OpsError("ops port must be an integer")
     text = raw.strip()
-    if not text.isdigit():
+    if len(text) > 5 or not text.isdigit():
         raise OpsError("ops port must be an integer")
     port = int(text)
     check_ops_port(port)
@@ -133,7 +135,7 @@ def _show_book(loaded: object) -> object:
             continue
         for key in ("entry_micro", "peak_micro"):
             raw = pos.get(key)
-            if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+            if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0 or raw > 10**24:
                 pos[key] = "unreadable"
                 continue
             pos[key] = format_price(raw * 1_000_000 if legacy else raw)
@@ -142,7 +144,7 @@ def _show_book(loaded: object) -> object:
 
 def _public(value: object) -> object:
     if isinstance(value, dict):
-        return {key: _public(item) for key, item in value.items() if not _hidden(str(key))}
+        return {key: _public(item) for key, item in value.items() if isinstance(key, str) and not _hidden(key)}
     if isinstance(value, list):
         return [_public(item) for item in value]
     return value
@@ -165,13 +167,21 @@ def _heartbeat(data_dir: Path) -> dict[str, object] | None:
     path = data_dir / "ops_heartbeat.json"
     if not path.exists():
         return None
+    try:
+        if path.stat().st_size > 1_000_000:
+            return None
+    except OSError:
+        return None
     loaded = _read_json(path)
-    if not isinstance(loaded, dict) or not loaded.get("at"):
+    if not isinstance(loaded, dict):
+        return None
+    stamp = loaded.get("at")
+    if not isinstance(stamp, str) or not stamp:
         return None
     from datetime import datetime
 
     try:
-        then = datetime.fromisoformat(str(loaded["at"]))
+        then = datetime.fromisoformat(stamp)
         if then.tzinfo is None:
             return None
         age = int((datetime.now().astimezone() - then).total_seconds())
@@ -179,7 +189,10 @@ def _heartbeat(data_dir: Path) -> dict[str, object] | None:
         return None
     if age < 0:
         return None
-    return {"at": loaded["at"], "book": loaded.get("book") or "", "age_sec": age}
+    book = loaded.get("book")
+    if not isinstance(book, str):
+        book = ""
+    return {"at": stamp, "book": book, "age_sec": age}
 
 
 def _quotes(data_dir: Path) -> dict[str, object]:

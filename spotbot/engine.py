@@ -778,12 +778,14 @@ def _open_liquidity(
             break
         if _try_buy(cfg, client, book, path, book_name, symbol, price, reason, deadline):
             opened += 1
-            target = price * (10_000 + _risk(cfg)[1]) // 10_000
+            take_bps = _risk(cfg)[1]
+            target = price * (10_000 + take_bps) // 10_000 if isinstance(price, int) and not isinstance(price, bool) else 0
+            shown = format_price(target) if isinstance(target, int) and not isinstance(target, bool) and 0 < target < 10**24 else "unreadable"
             LOG.info(
                 "entry lift %s score=%s target=%s",
                 symbol,
                 points,
-                format_price(target),
+                shown,
             )
         else:
             skipped += 1
@@ -1118,7 +1120,14 @@ def _apply_progress(
     quote_micro: int,
     price_micro: int,
 ) -> bool:
-    order_id = str(order.get("orderId") or "")
+    raw_id = order.get("orderId")
+    if isinstance(raw_id, str):
+        order_id = raw_id.strip()
+    elif isinstance(raw_id, int) and not isinstance(raw_id, bool) and raw_id > 0:
+        order_id = str(raw_id)
+    else:
+        LOG.warning("pending order has no exchange id")
+        return False
     if not exchange_order_id_ok(order_id):
         LOG.warning("pending order has no exchange id")
         return False
@@ -1182,7 +1191,7 @@ def _order_fees(
     client: MexcClient, symbol: str, order_id: str, side: str
 ) -> tuple[int, int, int, int] | None:
     """USDT fee and base-asset fee. None when the fee cannot be priced."""
-    if not symbol.endswith("USDT") or len(symbol) <= 4:
+    if not isinstance(symbol, str) or not symbol.endswith("USDT") or len(symbol) <= 4:
         LOG.warning("fee asset unknown for %s", symbol)
         return None
     try:

@@ -30,7 +30,7 @@ def note_event(data_dir: Path, **fields: object) -> None:
             prior = _event_lines(path) if path.exists() else []
             prior.append(json.dumps(row, ensure_ascii=False))
             _write(path, "\n".join(prior[-_MAX_EVENTS:]) + "\n")
-    except (OSError, UnicodeError, MemoryError) as exc:
+    except (OSError, UnicodeError, TypeError, ValueError, MemoryError) as exc:
         LOG.warning("ops event was not written: %s", exc)
 
 

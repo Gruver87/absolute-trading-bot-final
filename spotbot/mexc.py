@@ -71,12 +71,46 @@ def backoff_sec(retry_after_sec: int | None, interval_sec: int) -> int:
     return max(interval_sec, stated)
 
 
-def _retry_after_sec(value: str) -> int | None:
-    """Parse a delta-seconds Retry-After. An HTTP date is not guessed."""
+def _retry_after_sec(value: object) -> int | None:
+    """Parse a delta-seconds Retry-After. An HTTP date is not guessed.
+
+    A value that is not short digit text is an unknown wait, not a huge integer.
+    """
+    if not isinstance(value, str):
+        return None
     text = value.strip()
-    if not text.isdigit():
+    if len(text) > 8 or not text.isdigit():
         return None
     return int(text)
+
+
+def _api_path(path: object) -> str:
+    """A relative MEXC path. A host, a query, or an at-sign is not requested."""
+    if not isinstance(path, str) or not path.startswith("/api/v3/") or len(path) > 96:
+        raise MexcError("request path is refused")
+    rest = path[len("/api/v3/") :]
+    if not rest or any(ch not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789/_-" for ch in rest):
+        raise MexcError("request path is refused")
+    return path
+
+
+def _query(params: object) -> dict[str, str]:
+    """Query text. A number or a line break is not signed or sent."""
+    if not isinstance(params, dict):
+        raise MexcError("query is not an object")
+    out: dict[str, str] = {}
+    for key, value in params.items():
+        if (
+            not isinstance(key, str)
+            or not isinstance(value, str)
+            or not key
+            or len(key) > 64
+            or len(value) > 80
+            or any(ch in key or ch in value for ch in "\r\n\x00")
+        ):
+            raise MexcError("query value is not text")
+        out[key] = value
+    return out
 
 
 @dataclass(frozen=True)
@@ -102,6 +136,10 @@ class MexcClient:
     def __init__(self, api_key: str = "", api_secret: str = "", timeout_sec: int = 8) -> None:
         if isinstance(timeout_sec, bool) or not isinstance(timeout_sec, int) or timeout_sec < 1:
             raise MexcError("timeout_sec must be >= 1")
+        if not isinstance(api_key, str) or not isinstance(api_secret, str):
+            raise MexcError("API key is not text")
+        if len(api_key) > 256 or len(api_secret) > 256 or any(ch in api_key or ch in api_secret for ch in "\r\n\x00"):
+            raise MexcError("API key is not a single line")
         self._key = api_key
         self._secret = api_secret
         self._timeout = timeout_sec
@@ -118,7 +156,11 @@ class MexcClient:
 
     def ohlcv(self, symbol: str, interval: str = "5m", limit: int = 30) -> list[tuple[int, int, int, int, int]]:
         """Rows of open, high, low, close, quote-volume, all in micro-USDT."""
+        symbol = _text_symbol(symbol)
+        if not isinstance(interval, str) or not interval:
+            raise MexcError("kline interval is not text")
         _public_limit(limit, "kline")
+        _interval_ms(interval)
         payload = self._public(
             "/api/v3/klines",
             {"symbol": symbol, "interval": interval, "limit": str(limit)},
@@ -128,12 +170,14 @@ class MexcClient:
 
     def depth_notional(self, symbol: str, limit: int = 20) -> tuple[int, int]:
         """Bid and ask notional in micro-USDT for the top of the book."""
+        symbol = _text_symbol(symbol)
         _public_limit(limit, "depth")
         payload = self._public("/api/v3/depth", {"symbol": symbol, "limit": str(limit)})
         return depth_notionals(payload, symbol)
 
     def book_top(self, symbol: str) -> tuple[int, int]:
         """Best bid and ask. One public request, not a socket. A crossed book is refused."""
+        symbol = _text_symbol(symbol)
         payload = self._public("/api/v3/ticker/bookTicker", {"symbol": symbol})
         return book_prices(payload, symbol)
 
@@ -149,12 +193,16 @@ class MexcClient:
 
     def liquid_usdt(self, min_quote_micro: int, change_min_bps: int, change_max_bps: int, cap: int) -> list[str]:
         """USDT pairs whose 24h quote volume is real and whose move has started, not finished."""
+        bounds = (min_quote_micro, change_min_bps, change_max_bps, cap)
+        if any(isinstance(item, bool) or not isinstance(item, int) for item in bounds) or cap < 1:
+            return []
         payload = self._public("/api/v3/ticker/24hr", {})
         if not isinstance(payload, list):
             raise MexcError("24h ticker is not a list")
         return rank_liquid(payload, min_quote_micro, change_min_bps, change_max_bps, cap)
 
     def price(self, symbol: str) -> int:
+        symbol = _text_symbol(symbol)
         payload = self._public("/api/v3/ticker/price", {"symbol": symbol})
         return ticker_price(payload, symbol)
 
@@ -166,6 +214,12 @@ class MexcClient:
         return positive_int(payload.get("serverTime"), "server time")
 
     def symbol_rule(self, symbol: str) -> SymbolRule:
+        if not isinstance(symbol, str) or not symbol:
+            raise MexcError("exchangeInfo symbol is not text")
+        from spotbot.state import usdt_symbol_ok
+
+        if not usdt_symbol_ok(symbol):
+            raise MexcError("exchangeInfo symbol is not a USDT pair")
         cached = self._rules.get(symbol)
         if cached is not None:
             return cached
@@ -177,7 +231,8 @@ class MexcClient:
             raise MexcError(f"no exchangeInfo row for {symbol}")
         if len(rows) != 1:
             raise MexcError(f"exchangeInfo for {symbol} has more than one row")
-        if str(rows[0].get("symbol") or "") != symbol:
+        named = rows[0].get("symbol")
+        if not isinstance(named, str) or named != symbol:
             raise MexcError(f"exchangeInfo is not {symbol}")
         rule = parse_symbol_rule(rows[0])
         self._rules[symbol] = rule
@@ -247,6 +302,10 @@ class MexcClient:
         )
 
     def order_by_client(self, symbol: str, client_order_id: str) -> dict[str, Any]:
+        from spotbot.state import client_id_ok, usdt_symbol_ok
+
+        if not usdt_symbol_ok(symbol) or not client_id_ok(client_order_id):
+            raise MexcError("order lookup is missing a pair or a client id")
         body = self._signed(
             "GET",
             "/api/v3/order",
@@ -256,6 +315,12 @@ class MexcClient:
 
     def my_trades(self, symbol: str, limit: int = 100, order_id: str = "") -> list[object]:
         """Trades for one symbol. Pass order_id so the fee is not taken from a later fill."""
+        symbol = _text_symbol(symbol)
+        _public_limit(limit, "trade")
+        if not isinstance(order_id, str):
+            raise MexcError("trade order id is not text")
+        if order_id and (not order_id.isdigit() or len(order_id) > 32):
+            raise MexcError("trade order id is not digits")
         params = {"symbol": symbol, "limit": str(limit)}
         if order_id:
             params["orderId"] = order_id
@@ -281,6 +346,8 @@ class MexcClient:
         return session
 
     def _public(self, path: str, params: dict[str, str]) -> Any:
+        path = _api_path(path)
+        params = _query(params)
         try:
             response = self._session().get(
                 BASE + path, params=params, timeout=self._timeout, allow_redirects=False
@@ -299,9 +366,12 @@ class MexcClient:
         return body
 
     def _signed(self, method: str, path: str, params: dict[str, str], as_list: bool = False) -> Any:
+        if method not in ("GET", "POST"):
+            raise MexcError("request method is refused")
         if not self._key or not self._secret:
             raise MexcError("signed call without API key")
-        query = dict(params)
+        path = _api_path(path)
+        query = _query(params)
         query["timestamp"] = str(time.time_ns() // 1_000_000)
         query["recvWindow"] = "5000"
         encoded = urlencode(query)
@@ -319,7 +389,11 @@ class MexcClient:
         if response.status_code in (403, 418, 429):
             _raise_limited("order", response.status_code, response.headers.get("Retry-After", ""))
         if response.status_code != 200:
-            raise MexcError(f"order HTTP {response.status_code}: {response.text[:180]}")
+            raw = getattr(response, "content", b"")
+            if not isinstance(raw, (bytes, bytearray)):
+                raw = b""
+            shown = raw[:180].decode("utf-8", errors="replace")
+            raise MexcError(f"order HTTP {response.status_code}: {shown}")
         return signed_payload(_json_body(response, "order"), as_list)
 
 
@@ -427,7 +501,11 @@ def depth_notionals(payload: object, symbol: str) -> tuple[int, int]:
     if min(price for price, _notional in asks) < max(price for price, _notional in bids):
         raise MexcError(f"crossed depth for {symbol}")
     positive_int(payload.get("lastUpdateId"), f"depth update for {symbol}")
-    return sum(notional for _price, notional in bids), sum(notional for _price, notional in asks)
+    bid_sum = sum(notional for _price, notional in bids)
+    ask_sum = sum(notional for _price, notional in asks)
+    if bid_sum >= 10**24 or ask_sum >= 10**24:
+        raise MexcError(f"depth notional for {symbol} is too large")
+    return bid_sum, ask_sum
 
 
 def _reject_exchange_code(body: dict[str, Any]) -> None:
@@ -490,6 +568,8 @@ def _depth_side(levels: object) -> list[tuple[int, int]]:
     """Positive levels as price and notional. A zero size is not a level."""
     if not isinstance(levels, list):
         raise MexcError("depth side is not a list")
+    if len(levels) > 5_000:
+        raise MexcError("depth side is too large")
     rows: list[tuple[int, int]] = []
     for level in levels:
         if not isinstance(level, list) or len(level) < 2:
@@ -515,6 +595,8 @@ def _base_atoms(qty: str) -> int:
         raise MexcError(f"filled quantity is not decimal: {qty}") from exc
     if atoms <= 0:
         raise MexcError(f"filled quantity rounds to zero: {qty}")
+    if atoms >= 10**24:
+        raise MexcError("filled quantity is too large")
     return int(atoms)
 
 
@@ -524,12 +606,14 @@ def positive_int(raw: object, label: str) -> int:
         raise MexcError(f"{label} is not an integer")
     if isinstance(raw, int):
         value = raw
-    elif isinstance(raw, str) and raw.strip().isdigit():
+    elif isinstance(raw, str) and raw.strip().isdigit() and len(raw.strip()) <= 24:
         value = int(raw.strip())
     else:
         raise MexcError(f"{label} is not an integer")
     if value <= 0:
         raise MexcError(f"{label} is not positive")
+    if value >= 10**24:
+        raise MexcError(f"{label} is too large")
     return value
 
 
@@ -584,6 +668,8 @@ def parse_klines(symbol: str, payload: object, span_ms: int | None = None) -> li
         raise MexcError(f"kline interval for {symbol} is not the one requested")
     if not isinstance(payload, list) or len(payload) < 2:
         raise MexcError(f"no klines for {symbol}")
+    if len(payload) > 1_000:
+        raise MexcError(f"too many klines for {symbol}")
     rows: list[tuple[int, int, int, int, int]] = []
     previous_open = 0
     previous_close = 0
@@ -643,12 +729,34 @@ _ID_SEQ = 0
 
 def new_client_order_id(symbol: str, side: str) -> str:
     """A 32-character id. A counter keeps two calls in the same nanosecond apart."""
+    from spotbot.state import usdt_symbol_ok
+
+    if not usdt_symbol_ok(symbol) or side not in ("B", "S"):
+        raise MexcError("client id needs a USDT pair and a side")
     global _ID_SEQ
     with _ID_LOCK:
         _ID_SEQ += 1
         seq = _ID_SEQ
     digest = hashlib.sha256(f"{side}:{symbol}:{time.time_ns()}:{seq}".encode()).hexdigest()
     return digest[:32]
+
+
+def _filled_quote_raw(body: dict[str, Any]) -> object:
+    """Quote that traded. A present zero does not fall through to the other spelling."""
+    if "cummulativeQuoteQty" in body and body.get("cummulativeQuoteQty") not in (None, ""):
+        return body.get("cummulativeQuoteQty")
+    return body.get("cumulativeQuoteQty")
+
+
+def _text_symbol(symbol: object) -> str:
+    """A pair name is an uppercase USDT symbol. Anything else is not requested."""
+    from spotbot.state import usdt_symbol_ok
+
+    if not isinstance(symbol, str) or not symbol:
+        raise MexcError("symbol is not text")
+    if not usdt_symbol_ok(symbol):
+        raise MexcError("symbol is not a USDT pair")
+    return symbol
 
 
 def executed_fill(body: dict[str, Any]) -> tuple[int, int, int] | None:
@@ -667,7 +775,7 @@ def executed_fill(body: dict[str, Any]) -> tuple[int, int, int] | None:
         raise MexcError("filled quantity is not decimal") from exc
     if text == "" or _decimal_zero(text):
         return None
-    raw = body.get("cummulativeQuoteQty") or body.get("cumulativeQuoteQty")
+    raw = _filled_quote_raw(body)
     base = _base_atoms(text)
     if raw in (None, ""):
         raise MexcError("executed order is missing quote qty")
@@ -726,7 +834,7 @@ def _require_filled(body: dict[str, Any], label: str) -> None:
 
 def _filled_quote(body: dict[str, Any], label: str) -> int:
     """Quote that actually traded. The requested amount is not a fill."""
-    raw = body.get("cummulativeQuoteQty") or body.get("cumulativeQuoteQty")
+    raw = _filled_quote_raw(body)
     if raw in (None, ""):
         raise MexcError(f"{label} has no quote qty")
     try:
@@ -739,8 +847,8 @@ def _filled_quote(body: dict[str, Any], label: str) -> int:
 
 
 def _base_asset(symbol: str) -> str:
-    if not symbol.endswith("USDT") or len(symbol) <= 4:
-        raise MexcError(f"{symbol or 'missing'} is not a USDT pair")
+    if not isinstance(symbol, str) or not symbol.endswith("USDT") or len(symbol) <= 4:
+        raise MexcError("symbol is not a USDT pair")
     return symbol[:-4]
 
 
@@ -758,7 +866,10 @@ def ack_commission(body: dict[str, Any], base_asset: str) -> tuple[int, int]:
         raise MexcError("ack commission is not decimal") from exc
     if raw in ("", "0", "0.0", "0.00") or decimal_zero(raw):
         return 0, 0
-    asset = str(body.get("commissionAsset") or "").upper()
+    asset_raw = body.get("commissionAsset")
+    if not isinstance(asset_raw, str) or not asset_raw.strip():
+        raise MexcError("ack commission asset is not text")
+    asset = asset_raw.strip().upper()
     if not base_asset:
         raise MexcError("ack commission needs a base asset")
     try:
@@ -779,7 +890,7 @@ def ack_commission(body: dict[str, Any], base_asset: str) -> tuple[int, int]:
 
 def _sell_credit(body: dict[str, Any], base_asset: str) -> tuple[int, int, int]:
     _require_filled(body, "sell")
-    raw = body.get("cummulativeQuoteQty") or body.get("cumulativeQuoteQty")
+    raw = _filled_quote_raw(body)
     if raw in (None, ""):
         raise MexcError("sell ack has no quote qty")
     credit = _filled_quote(body, "sell")
@@ -794,8 +905,8 @@ def parse_account(payload: dict[str, Any]) -> tuple[int, int, dict[str, int], di
     if not isinstance(payload, dict):
         raise MexcError("account balances missing")
     rows = payload.get("balances")
-    if not isinstance(rows, list):
-        raise MexcError("account balances missing")
+    if not isinstance(rows, list) or len(rows) > 5_000:
+        raise MexcError("account balances missing" if not isinstance(rows, list) else "account has too many balances")
     total_usdt = 0
     free_usdt = 0
     bases: dict[str, int] = {}
@@ -804,7 +915,13 @@ def parse_account(payload: dict[str, Any]) -> tuple[int, int, dict[str, int], di
     for row in rows:
         if not isinstance(row, dict):
             raise MexcError("balance row is not an object")
-        asset = str(row.get("asset") or "").strip().upper()
+        raw_asset = row.get("asset")
+        if raw_asset in (None, ""):
+            asset = ""
+        elif not isinstance(raw_asset, str):
+            raise MexcError("balance asset is not text")
+        else:
+            asset = raw_asset.strip().upper()
         free = _qty_micro(row.get("free"))
         locked = _qty_micro(row.get("locked"))
         if free < 0 or locked < 0:

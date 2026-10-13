@@ -118,6 +118,8 @@ def peer_prices(symbol: str, timeout_sec: int = 5) -> list[int]:
 
 def venue_quotes(symbol: str, timeout_sec: int = 5) -> dict[str, int]:
     """Binance, Bybit, and OKX spot last prices, keyed by venue."""
+    if not isinstance(symbol, str) or not symbol or isinstance(timeout_sec, bool) or not isinstance(timeout_sec, int) or timeout_sec < 1:
+        return {}
     session = getattr(_LOCAL, "session", None)
     if session is None:
         session = requests.Session()
@@ -174,13 +176,14 @@ def venue_quotes(symbol: str, timeout_sec: int = 5) -> dict[str, int]:
 
 
 def _okx_inst(symbol: str) -> str | None:
-    if not symbol.endswith("USDT") or len(symbol) <= 4:
+    if not isinstance(symbol, str) or not symbol.endswith("USDT") or len(symbol) <= 4:
         return None
     return f"{symbol[:-4]}-USDT"
 
 
 def _binance_price(body: object, symbol: str) -> str | None:
-    if not isinstance(body, dict) or str(body.get("symbol") or "") != symbol:
+    named = body.get("symbol") if isinstance(body, dict) else None
+    if not isinstance(body, dict) or not isinstance(named, str) or named != symbol:
         return None
     return _price_text(body.get("price"))
 
@@ -194,7 +197,8 @@ def _bybit_price(body: object, symbol: str) -> str | None:
     rows = result.get("list")
     if not isinstance(rows, list) or not rows or not isinstance(rows[0], dict):
         return None
-    if str(rows[0].get("symbol") or "") != symbol:
+    named = rows[0].get("symbol")
+    if not isinstance(named, str) or named != symbol:
         return None
     return _price_text(rows[0].get("lastPrice"))
 
@@ -205,7 +209,8 @@ def _okx_price(body: object, inst_id: str) -> str | None:
     rows = body.get("data")
     if not isinstance(rows, list) or not rows or not isinstance(rows[0], dict):
         return None
-    if str(rows[0].get("instId") or "") != inst_id:
+    named = rows[0].get("instId")
+    if not isinstance(named, str) or named != inst_id:
         return None
     return _price_text(rows[0].get("last"))
 

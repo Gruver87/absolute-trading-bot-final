@@ -74,6 +74,8 @@ def _funded_micro(path: Path) -> int:
 
 def ledger_dir(root: Path, live: bool) -> Path:
     """Paper cash and live cash never share a directory."""
+    if not isinstance(live, bool):
+        raise SleeveError("live flag must be on or off")
     return root / ("live" if live else "paper")
 
 

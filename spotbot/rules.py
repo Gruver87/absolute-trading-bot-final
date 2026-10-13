@@ -41,12 +41,18 @@ class SymbolRule:
 
 
 def parse_symbol_rule(row: dict[str, object]) -> SymbolRule:
-    symbol = str(row.get("symbol") or "")
-    if not symbol:
+    if not isinstance(row, dict):
+        raise RuleError("exchangeInfo row is not an object")
+    symbol = row.get("symbol")
+    if not isinstance(symbol, str) or not symbol:
         raise RuleError("exchangeInfo row has no symbol")
     taker_bps = _taker_bps(row.get("takerCommission"))
     step, step_reason = _step_atoms(row.get("baseSizePrecision"))
-    quote_step, quote_reason = _quote_step(row.get("quoteAmountPrecisionMarket") or row.get("quoteAmountPrecision"))
+    market_quote = row.get("quoteAmountPrecisionMarket")
+    if market_quote not in (None, ""):
+        quote_step, quote_reason = _quote_step(market_quote)
+    else:
+        quote_step, quote_reason = _quote_step(row.get("quoteAmountPrecision"))
     max_quote = _max_quote(row.get("maxQuoteAmountMarket"))
     tick, tick_reason = _price_tick(row.get("quotePrecision"))
     reason = (
@@ -56,8 +62,9 @@ def parse_symbol_rule(row: dict[str, object]) -> SymbolRule:
         or tick_reason
         or _max_quote_reason(row.get("maxQuoteAmountMarket"))
     )
+    base = row.get("baseAsset")
     return SymbolRule(
-        symbol, reason == "", reason, taker_bps, step, quote_step, max_quote, str(row.get("baseAsset") or ""), tick
+        symbol, reason == "", reason, taker_bps, step, quote_step, max_quote, base if isinstance(base, str) else "", tick
     )
 
 
@@ -116,14 +123,19 @@ def plan_paper_buy(
 ) -> tuple[int, int, int] | None:
     """Return base atoms, fee, and cash debit. Fee comes out of the spend."""
     nums = (spend_micro, price_micro, step_atoms, taker_bps)
-    if any(isinstance(item, bool) or not isinstance(item, int) for item in nums) or spend_micro <= 0 or price_micro <= 0 or step_atoms <= 0 or taker_bps < 0:
+    if any(isinstance(item, bool) or not isinstance(item, int) for item in nums) or spend_micro <= 0 or price_micro <= 0 or step_atoms <= 0 or taker_bps < 0 or taker_bps > 100:
         return None
-    net = spend_micro - fee_on(spend_micro, taker_bps)
-    base = round_base_atoms(base_for_quote(net, price_micro), step_atoms)
-    if base <= 0:
+    if spend_micro >= 10**24 or price_micro >= 10**24:
         return None
-    notional = notional_micro(base, price_micro)
-    fee = fee_on(notional, taker_bps)
+    try:
+        net = spend_micro - fee_on(spend_micro, taker_bps)
+        base = round_base_atoms(base_for_quote(net, price_micro), step_atoms)
+        if base <= 0:
+            return None
+        notional = notional_micro(base, price_micro)
+        fee = fee_on(notional, taker_bps)
+    except (ValueError, MoneyError):
+        return None
     debit = notional + fee
     if debit <= 0 or debit > spend_micro:
         return None
@@ -131,29 +143,29 @@ def plan_paper_buy(
 
 
 def _refuse_reason(row: dict[str, object]) -> str:
-    if str(row.get("status") or "") != "1":
+    if row.get("status") != "1":
         return "symbol status is not trading"
     if row.get("isSpotTradingAllowed") is not True:
         return "spot trading is off"
-    if str(row.get("quoteAsset") or "") != "USDT":
+    if row.get("quoteAsset") != "USDT":
         return "quote is not USDT"
-    base = str(row.get("baseAsset") or "")
-    symbol = str(row.get("symbol") or "")
-    if not base or symbol != f"{base}USDT":
+    base = row.get("baseAsset")
+    symbol = row.get("symbol")
+    if not isinstance(base, str) or not isinstance(symbol, str) or not base or symbol != f"{base}USDT":
         return "base asset does not match the symbol"
-    if row.get("st") is True:
+    st = row.get("st")
+    if st is True or st == 1 or (isinstance(st, str) and st.strip().lower() == "true"):
         return "ST tag"
     plates = row.get("conceptPlates")
     if isinstance(plates, list):
         for plate in plates:
-            if "assessment" in str(plate).lower():
+            if isinstance(plate, str) and "assessment" in plate.lower():
                 return "assessment zone"
     types = row.get("orderTypes")
-    names = {str(item).upper() for item in types} if isinstance(types, list) else set()
+    names = {item.upper() for item in types if isinstance(item, str)} if isinstance(types, list) else set()
     if "MARKET" not in names:
         return "market orders are off"
-    side = str(row.get("tradeSideType") or "")
-    if side != "1":
+    if row.get("tradeSideType") != "1":
         return "spot side is not two-way"
     return ""
 

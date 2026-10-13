@@ -10,6 +10,8 @@ from pathlib import Path
 
 from spotbot.money import MoneyError, implied_price_micro
 
+_MAX_BOOK = 10**24
+
 _CLIENT_ID = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
 
 
@@ -46,14 +48,14 @@ class Position:
             if key not in raw:
                 raise LedgerError("position is missing a field")
         return cls(
-            symbol=str(raw["symbol"]),
+            symbol=_text(raw["symbol"], "symbol"),
             entry_micro=_as_int(raw["entry_micro"], "entry_micro"),
             peak_micro=_as_int(raw["peak_micro"], "peak_micro"),
             quote_micro=_as_int(raw["quote_micro"], "quote_micro"),
             base_atoms=_as_int(raw["base_atoms"], "base_atoms"),
-            reason=str(raw["reason"]),
-            client_order_id=str(raw.get("client_order_id") or ""),
-            exchange_order_id=str(raw.get("exchange_order_id") or ""),
+            reason=_text(raw["reason"], "reason"),
+            client_order_id=_text(raw.get("client_order_id"), "client_order_id"),
+            exchange_order_id=_text(raw.get("exchange_order_id"), "exchange_order_id"),
             hold_flat=_flag(raw.get("hold_flat", False), "gap hold"),
         )
 
@@ -142,6 +144,15 @@ def _as_int(value: object, label: str) -> int:
     return value
 
 
+def _text(value: object, label: str) -> str:
+    """Book text. A JSON number is not an id, a pair, or a blank ledger."""
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise LedgerError(f"{label} is not text")
+    return value
+
+
 def _pair_stops(raw: object) -> dict[str, list[int]]:
     if raw is None:
         return {}
@@ -149,9 +160,11 @@ def _pair_stops(raw: object) -> dict[str, list[int]]:
         raise LedgerError("pair stops are not an object")
     out: dict[str, list[int]] = {}
     for key, value in raw.items():
+        if not isinstance(key, str):
+            raise LedgerError("pair stop symbol is not text")
         if not isinstance(value, list):
             raise LedgerError("pair stop times are not a list")
-        out[str(key)] = [_as_int(item, "pair stop") for item in value]
+        out[key] = [_as_int(item, "pair stop") for item in value]
     return out
 
 
@@ -160,14 +173,19 @@ def _pair_locks(raw: object) -> dict[str, int]:
         return {}
     if not isinstance(raw, dict):
         raise LedgerError("pair locks are not an object")
-    return {str(key): _as_int(value, "pair lock") for key, value in raw.items()}
+    out: dict[str, int] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str):
+            raise LedgerError("pair lock symbol is not text")
+        out[key] = _as_int(value, "pair lock")
+    return out
 
 
 _MAX_BOOK_BYTES = 1_000_000
 
 
 def load_book(path: Path, paper_cash_micro: int) -> Book:
-    if not _is_int(paper_cash_micro) or paper_cash_micro < 0:
+    if not _is_int(paper_cash_micro) or paper_cash_micro < 0 or paper_cash_micro >= _MAX_BOOK:
         raise LedgerError("paper cash is not a non-negative integer")
     if not path.exists():
         return Book(cash_micro=paper_cash_micro, positions=[], realized_micro=0, fees_micro=0)
@@ -198,12 +216,12 @@ def load_book(path: Path, paper_cash_micro: int) -> Book:
         positions=positions,
         realized_micro=_as_int(raw.get("realized_micro", 0), "realized_micro"),
         fees_micro=_as_int(raw.get("fees_micro", 0), "fees_micro"),
-        guard_day=str(raw.get("guard_day") or ""),
+        guard_day=_text(raw.get("guard_day"), "guard_day"),
         guard_realized_micro=_as_int(raw.get("guard_realized_micro", 0), "guard_realized_micro"),
         guard_cash_micro=_as_int(raw.get("guard_cash_micro", 0), "guard_cash_micro"),
-        pending_client_id=str(raw.get("pending_client_id") or ""),
-        pending_symbol=str(raw.get("pending_symbol") or ""),
-        pending_side=str(raw.get("pending_side") or ""),
+        pending_client_id=_text(raw.get("pending_client_id"), "pending_client_id"),
+        pending_symbol=_text(raw.get("pending_symbol"), "pending_symbol"),
+        pending_side=_text(raw.get("pending_side"), "pending_side"),
         pending_base_atoms=_as_int(raw.get("pending_base_atoms", 0), "pending_base_atoms"),
         pending_quote_micro=_as_int(raw.get("pending_quote_micro", 0), "pending_quote_micro"),
         pending_applied_atoms=_as_int(raw.get("pending_applied_atoms", 0), "pending_applied_atoms"),
@@ -213,9 +231,9 @@ def load_book(path: Path, paper_cash_micro: int) -> Book:
         pending_misses=_as_int(raw.get("pending_misses", 0), "pending_misses"),
         pending_open_base=_as_int(raw.get("pending_open_base", 0), "pending_open_base"),
         pending_open_quote=_as_int(raw.get("pending_open_quote", 0), "pending_open_quote"),
-        pending_exchange_order_id=str(raw.get("pending_exchange_order_id") or ""),
+        pending_exchange_order_id=_text(raw.get("pending_exchange_order_id"), "pending_exchange_order_id"),
         cooldown_until=_as_int(raw.get("cooldown_until", 0), "cooldown_until"),
-        ledger=str(raw.get("ledger") or ""),
+        ledger=_text(raw.get("ledger"), "ledger"),
         equity_peak_micro=_as_int(raw.get("equity_peak_micro", 0), "equity_peak_micro"),
         pair_stops=_pair_stops(raw.get("pair_stops")),
         pair_lock_until=_pair_locks(raw.get("pair_lock_until")),
@@ -252,11 +270,11 @@ def _audit_pair_map(stops: dict[str, list[int]], locks: dict[str, int]) -> None:
         if len(stamps) > 8:
             raise LedgerError("pair stop list is too long")
         for stamp in stamps:
-            if stamp < 0 or stamp > 4_102_444_800:
+            if not _is_int(stamp) or stamp < 0 or stamp > 4_102_444_800:
                 raise LedgerError("pair stop is not a timestamp")
     for symbol, until in locks.items():
         _audit_pair_symbol(symbol)
-        if until < 0 or until > 4_102_444_800:
+        if not _is_int(until) or until < 0 or until > 4_102_444_800:
             raise LedgerError("pair lock is not a timestamp")
 
 
@@ -267,11 +285,15 @@ def _audit_pair_symbol(symbol: str) -> None:
 
 def usdt_symbol_ok(symbol: str) -> bool:
     """A spot pair is uppercase letters and digits, quoted in USDT."""
+    if not isinstance(symbol, str):
+        return False
     return bool(symbol.endswith("USDT") and len(symbol) > 4 and symbol[:-4].isalnum() and symbol[:-4].isupper())
 
 
 def _guard_day_ok(day: str) -> None:
     """An empty day is a new book. A future day would wipe the daily halt."""
+    if not isinstance(day, str):
+        raise LedgerError("guard day is not a date")
     if day == "":
         return
     from datetime import date, datetime, timezone
@@ -304,17 +326,21 @@ def audit_book(book: Book) -> None:
     ):
         if not _is_int(amount):
             raise LedgerError(f"{label} is not an integer")
+        if amount <= -_MAX_BOOK or amount >= _MAX_BOOK:
+            raise LedgerError(f"{label} is too large")
     if book.cash_micro < 0 or book.fees_micro < 0 or book.guard_cash_micro < 0:
         raise LedgerError("book cash is negative")
     if book.pending_side not in ("", "BUY", "SELL"):
         raise LedgerError("pending side is not buy or sell")
+    if book.ledger not in ("", "paper", "live"):
+        raise LedgerError("book ledger is not paper or live")
     if book.pending_client_id and (not book.pending_symbol or not book.pending_side):
         raise LedgerError("pending client id has no order")
     if book.pending_client_id and not client_id_ok(book.pending_client_id):
         raise LedgerError("pending client id is not an exchange id")
     if book.pending_exchange_order_id and not exchange_order_id_ok(book.pending_exchange_order_id):
         raise LedgerError("pending exchange order id is not digits")
-    if book.pending_client_id and (not book.pending_symbol.endswith("USDT") or len(book.pending_symbol) <= 4):
+    if book.pending_client_id and not usdt_symbol_ok(book.pending_symbol):
         raise LedgerError("pending symbol is not a USDT pair")
     if book.pending_symbol:
         _audit_pair_symbol(book.pending_symbol)
@@ -339,6 +365,8 @@ def audit_book(book: Book) -> None:
     ):
         if not _is_int(amount):
             raise LedgerError(f"{label} is not an integer")
+        if amount >= _MAX_BOOK:
+            raise LedgerError(f"{label} is too large")
         if amount < 0:
             raise LedgerError(f"{label} is negative")
     if book.cooldown_until > 4_102_444_800:
@@ -351,16 +379,16 @@ def audit_book(book: Book) -> None:
     _audit_pair_map(book.pair_stops or {}, book.pair_lock_until or {})
     if book.credited_main_micro is not None and not _is_int(book.credited_main_micro):
         raise LedgerError("credited main is not an integer")
-    if book.credited_main_micro is not None and book.credited_main_micro < 0:
-        raise LedgerError("credited main is negative")
+    if book.credited_main_micro is not None and (book.credited_main_micro < 0 or book.credited_main_micro >= _MAX_BOOK):
+        raise LedgerError("credited main is negative" if book.credited_main_micro < 0 else "credited main is too large")
     if book.pending_ack_fee is not None and not _is_int(book.pending_ack_fee):
         raise LedgerError("ack fee is not an integer")
-    if book.pending_ack_fee is not None and book.pending_ack_fee < 0:
-        raise LedgerError("ack fee is negative")
+    if book.pending_ack_fee is not None and (book.pending_ack_fee < 0 or book.pending_ack_fee >= _MAX_BOOK):
+        raise LedgerError("ack fee is negative" if book.pending_ack_fee < 0 else "ack fee is too large")
     if book.pending_ack_base_fee is not None and not _is_int(book.pending_ack_base_fee):
         raise LedgerError("ack base fee is not an integer")
-    if book.pending_ack_base_fee is not None and book.pending_ack_base_fee < 0:
-        raise LedgerError("ack base fee is negative")
+    if book.pending_ack_base_fee is not None and (book.pending_ack_base_fee < 0 or book.pending_ack_base_fee >= _MAX_BOOK):
+        raise LedgerError("ack base fee is negative" if book.pending_ack_base_fee < 0 else "ack base fee is too large")
     if book.pending_applied_fee > book.pending_applied_quote:
         raise LedgerError("booked fee is above the fill")
     if book.pending_client_id and book.pending_side == "BUY":
@@ -379,7 +407,7 @@ def audit_book(book: Book) -> None:
     seen_clients: set[str] = set()
     seen_orders: set[str] = set()
     for pos in book.positions:
-        if not pos.symbol.endswith("USDT") or len(pos.symbol) <= 4:
+        if not usdt_symbol_ok(pos.symbol):
             raise LedgerError(f"{pos.symbol or 'missing'} is not a USDT pair")
         _audit_pair_symbol(pos.symbol)
         if pos.symbol in seen_symbols:
@@ -387,10 +415,14 @@ def audit_book(book: Book) -> None:
         seen_symbols.add(pos.symbol)
         if not all(_is_int(item) for item in (pos.base_atoms, pos.quote_micro, pos.entry_micro, pos.peak_micro)):
             raise LedgerError(f"{pos.symbol} size or price is not an integer")
+        if any(item >= _MAX_BOOK for item in (pos.base_atoms, pos.quote_micro, pos.entry_micro, pos.peak_micro)):
+            raise LedgerError(f"{pos.symbol} size or price is too large")
         if pos.base_atoms <= 0 or pos.quote_micro < 0 or pos.entry_micro <= 0 or pos.peak_micro <= 0:
             raise LedgerError(f"{pos.symbol} size or price is not positive")
         if pos.peak_micro < pos.entry_micro:
             raise LedgerError(f"{pos.symbol} peak is below the entry")
+        if not isinstance(pos.reason, str):
+            raise LedgerError("position reason is not text")
         if not isinstance(pos.hold_flat, bool):
             raise LedgerError("gap hold is not a flag")
         if book.pending_side == "SELL" and book.pending_client_id and pos.client_order_id == book.pending_client_id:
@@ -486,7 +518,7 @@ def remember_pending(
         raise LedgerError("pending order needs a client id, symbol, and side")
     if not client_id_ok(client_id):
         raise LedgerError("pending client id is not an exchange id")
-    if not symbol.endswith("USDT") or len(symbol) <= 4:
+    if not usdt_symbol_ok(symbol):
         raise LedgerError("pending symbol is not a USDT pair")
     if not _is_int(base_atoms) or not _is_int(quote_micro) or base_atoms < 0 or quote_micro < 0:
         raise LedgerError("pending size is not a non-negative integer")
@@ -545,13 +577,13 @@ def record_buy(
     """Debit quote and fee once. A repeated client id or a second row of the same pair does not debit again."""
     if not client_id_ok(client_order_id) or not exchange_order_id_ok(exchange_order_id):
         return False
-    if not symbol.endswith("USDT") or len(symbol) <= 4:
+    if not usdt_symbol_ok(symbol) or not isinstance(reason, str):
         return False
     if any(pos.client_order_id == client_order_id for pos in book.positions):
         return False
     if any(pos.symbol == symbol for pos in book.positions):
         return False
-    nums = (price_micro, base_atoms, quote_micro, fee_micro, book.cash_micro)
+    nums = (price_micro, base_atoms, quote_micro, fee_micro, book.cash_micro, book.fees_micro)
     if any(not _is_int(item) for item in nums):
         return False
     debit = quote_micro + fee_micro
@@ -596,7 +628,7 @@ def apply_buy_progress(
         or (book.pending_exchange_order_id != "" and book.pending_exchange_order_id != exchange_order_id)
     ):
         return False
-    nums = (price_micro, base_atoms, quote_micro, fee_micro, base_fee_atoms, book.cash_micro)
+    nums = (price_micro, base_atoms, quote_micro, fee_micro, base_fee_atoms, book.cash_micro, book.fees_micro)
     if any(not _is_int(item) for item in nums):
         return False
     if book.pending_quote_micro <= 0 or quote_micro > book.pending_quote_micro or fee_micro > quote_micro:
@@ -677,7 +709,7 @@ def apply_sell_progress(
     """Move the book forward to the latest sell fill. Only the new part is credited."""
     if book.pending_side != "SELL" or book.pending_symbol != symbol:
         return False
-    if any(not _is_int(item) for item in (sold_atoms, quote_micro, fee_micro, book.cash_micro)):
+    if any(not _is_int(item) for item in (sold_atoms, quote_micro, fee_micro, book.cash_micro, book.fees_micro, book.realized_micro)):
         return False
     if quote_micro <= 0 or book.pending_base_atoms <= 0 or sold_atoms > book.pending_base_atoms or fee_micro > quote_micro:
         return False
@@ -742,7 +774,7 @@ def record_sell_fill(
 
     Two rows of the same pair are not guessed. Pass the row that was sent.
     """
-    if any(not _is_int(item) for item in (sold_atoms, credit_micro, fee_micro, book.cash_micro)):
+    if any(not _is_int(item) for item in (sold_atoms, credit_micro, fee_micro, book.cash_micro, book.fees_micro, book.realized_micro)):
         return False
     if sold_atoms <= 0 or credit_micro < 0 or fee_micro < 0:
         return False

@@ -17,6 +17,8 @@ def inventory_mismatch(
     held: dict[str, int] = {}
     seen: set[str] = set()
     for symbol, atoms in [*positions, *(elsewhere or [])]:
+        if not isinstance(symbol, str):
+            return "pair name is not text"
         if symbol in seen:
             return f"{symbol} is listed twice"
         seen.add(symbol)
@@ -68,17 +70,29 @@ def order_finished(body: dict[str, object]) -> bool:
     return _status_name(body) in ("CANCELED", "PARTIALLY_CANCELED", "4", "5")
 
 
+def _has_code(text: str, code: str) -> bool:
+    """True when the code is a whole token. -20110 is not -2011."""
+    start = 0
+    while True:
+        at = text.find(code, start)
+        if at < 0:
+            return False
+        end = at + len(code)
+        before = at == 0 or not text[at - 1].isdigit()
+        after = end == len(text) or not text[end].isdigit()
+        if before and after:
+            return True
+        start = at + 1
+
+
 def order_missing(message: str) -> bool:
     """True only for an unknown order. A missing symbol or balance is not that."""
     if not isinstance(message, str):
         return False
     text = message.lower()
-    return (
-        "order does not exist" in text
-        or "unknown order" in text
-        or "-2011" in text
-        or "-2013" in text
-    )
+    if "order does not exist" in text or "unknown order" in text:
+        return True
+    return _has_code(text, "-2011") or _has_code(text, "-2013")
 
 
 def pending_gone(misses: int, applied_atoms: int, has_fill: bool, acked: bool = False) -> bool:

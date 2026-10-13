@@ -59,7 +59,7 @@ def note_pair_stop(book: Book, symbol: str, now: int, count: int, lock_sec: int)
     """Remember one stop. The lock starts only after enough stops inside the lookback."""
     if isinstance(now, bool) or isinstance(count, bool) or isinstance(lock_sec, bool) or not isinstance(now, int) or not isinstance(count, int) or not isinstance(lock_sec, int):
         return
-    if now < 0 or count < 2 or not symbol.endswith("USDT") or len(symbol) <= 4:
+    if now < 0 or count < 2 or not isinstance(symbol, str) or not symbol.endswith("USDT") or len(symbol) <= 4:
         return
     fresh = [stamp for stamp in (book.pair_stops or {}).get(symbol, []) if now - STOP_LOOKBACK_SEC < stamp <= now]
     fresh.append(now)
@@ -74,7 +74,7 @@ def note_pair_stop(book: Book, symbol: str, now: int, count: int, lock_sec: int)
 
 def pair_locked(book: Book, symbol: str, now: int) -> bool:
     """True while this symbol's stop lock is still in the future."""
-    if isinstance(now, bool) or not isinstance(now, int):
+    if isinstance(now, bool) or not isinstance(now, int) or not isinstance(symbol, str):
         return True
     until = (book.pair_lock_until or {}).get(symbol, 0)
     if isinstance(until, bool) or not isinstance(until, int):

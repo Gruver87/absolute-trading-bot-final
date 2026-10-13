@@ -7,7 +7,7 @@ from __future__ import annotations
 
 
 def pnl_bps(entry: int, price: int) -> int:
-    if isinstance(entry, bool) or isinstance(price, bool) or not isinstance(entry, int) or not isinstance(price, int) or entry <= 0 or price <= 0:
+    if isinstance(entry, bool) or isinstance(price, bool) or not isinstance(entry, int) or not isinstance(price, int) or entry <= 0 or price <= 0 or entry >= 10**24 or price >= 10**24:
         raise ValueError("entry and price must be positive")
     return (price - entry) * 10_000 // entry
 

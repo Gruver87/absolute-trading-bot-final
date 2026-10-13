@@ -54,6 +54,8 @@ def require_cycle_config(cfg: Config) -> None:
         raise ConfigError("live, entries, and the pair lock must be on or off")
     if not isinstance(cfg.api_key, str) or not isinstance(cfg.api_secret, str):
         raise ConfigError("api key must be text")
+    if len(cfg.api_key) > 256 or len(cfg.api_secret) > 256 or any(ch in cfg.api_key or ch in cfg.api_secret for ch in "\r\n\x00"):
+        raise ConfigError("API key is not a single line")
     if cfg.mode not in ("rsi", "liquidity"):
         raise ConfigError("mode must be rsi or liquidity")
     numbers = (
@@ -106,9 +108,12 @@ def require_cycle_config(cfg: Config) -> None:
 
 
 def _env_int(name: str, default: str, low: int, high: int) -> int:
-    """Read one integer env. A blank, a sign, or a fraction is refused."""
-    raw = os.environ.get(name, default).strip()
-    if not raw.isdigit():
+    """Read one integer env. A blank, a sign, a fraction, or a huge digit string is refused."""
+    raw = os.environ.get(name, default)
+    if not isinstance(raw, str):
+        raise ConfigError(f"{name} must be an integer")
+    raw = raw.strip()
+    if len(raw) > 8 or not raw.isdigit():
         raise ConfigError(f"{name} must be an integer")
     value = int(raw)
     if value < low or value > high:
@@ -118,16 +123,26 @@ def _env_int(name: str, default: str, low: int, high: int) -> int:
 
 def _env_flag(name: str, default: str) -> bool:
     """Read 0 or 1. Anything else is refused, not treated as on."""
-    raw = os.environ.get(name, default).strip()
+    raw = os.environ.get(name, default)
+    if not isinstance(raw, str):
+        raise ConfigError(f"{name} must be 0 or 1")
+    raw = raw.strip()
     if raw not in ("0", "1"):
         raise ConfigError(f"{name} must be 0 or 1")
     return raw == "1"
 
 
 def load_config(live_flag: bool, mode: str | None = None) -> Config:
+    if not isinstance(live_flag, bool):
+        raise ConfigError("live flag must be on or off")
+    if mode is not None and (not isinstance(mode, str) or len(mode) > 32):
+        raise ConfigError("SPOT_MODE must be rsi or liquidity")
+    raw_symbols = os.environ.get("SPOT_SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT")
+    if not isinstance(raw_symbols, str) or len(raw_symbols) > 512:
+        raise ConfigError("SPOT_SYMBOLS is empty")
     symbols = tuple(
         part.strip().upper()
-        for part in os.environ.get("SPOT_SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT").split(",")
+        for part in raw_symbols.split(",")
         if part.strip()
     )
     if not symbols:
@@ -139,9 +154,11 @@ def load_config(live_flag: bool, mode: str | None = None) -> Config:
             raise ConfigError(f"{symbol} is not a USDT pair")
     interval = _env_int("SPOT_INTERVAL_SEC", "60", 15, 86_400)
     env_live = os.environ.get("SPOT_LIVE", "0") == "1"
-    live = bool(live_flag and env_live)
+    live = live_flag and env_live
     key = os.environ.get("MEXC_API_KEY", "").strip()
     secret = os.environ.get("MEXC_API_SECRET", "").strip()
+    if any(ch in key or ch in secret for ch in "\r\n\x00"):
+        raise ConfigError("API key is not a single line")
     if live and (not key or not secret):
         raise ConfigError("live mode needs MEXC_API_KEY and MEXC_API_SECRET in the environment")
     if live_flag and not env_live:
