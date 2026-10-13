@@ -6,6 +6,7 @@ and never called. Entry here requires RSI plus one of those two confirmations.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 
@@ -71,7 +72,7 @@ def below_lower_band(prices: list[int], period: int = 20) -> bool:
     window = prices[-period:]
     mean = sum(window) // period
     var = sum((p - mean) ** 2 for p in window) // period
-    std = int(var**0.5)
+    std = math.isqrt(var)
     return prices[-1] <= mean - 2 * std
 
 

@@ -12,6 +12,8 @@ STANDARD_TAKER_BPS = 5
 
 
 def fee_on(notional_micro: int, taker_bps: int) -> int:
+    if isinstance(notional_micro, bool) or isinstance(taker_bps, bool):
+        raise ValueError("notional and fee must be integers")
     if notional_micro < 0 or taker_bps < 0:
         raise ValueError("notional and fee must be >= 0")
     return notional_micro * taker_bps // 10_000

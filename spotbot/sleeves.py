@@ -16,7 +16,7 @@ from spotbot.config import Config
 from spotbot.engine import run_cycle
 from spotbot.mexc import MexcClient, MexcError, MexcRateLimit
 from spotbot.money import format_usdt
-from spotbot.state import load_book, save_book, write_atomic
+from spotbot.state import load_book, save_book, usdt_symbol_ok, write_atomic
 
 LOG = logging.getLogger("spotbot")
 
@@ -40,12 +40,32 @@ SLEEVES: tuple[Sleeve, ...] = (
 
 def split_equal(amount_micro: int, parts: int = 3) -> tuple[int, ...]:
     """Split satoshi. The first part receives the remainder so the sum matches."""
+    if isinstance(amount_micro, bool) or isinstance(parts, bool) or not isinstance(amount_micro, int) or not isinstance(parts, int):
+        raise SleeveError("split amount must be an integer")
     if amount_micro < 0 or parts < 1:
         raise SleeveError("split amount must be >= 0")
     base = amount_micro // parts
     out = [base] * parts
     out[0] += amount_micro - base * parts
     return tuple(out)
+
+
+def _funded_micro(path: Path) -> int:
+    """The amount already split. A bool, a fraction, or a broken file does not add cash."""
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise SleeveError("treasury is not json") from exc
+    if not isinstance(raw, dict) or "funded_micro" not in raw:
+        raise SleeveError("treasury has no funded amount")
+    funded = raw["funded_micro"]
+    if isinstance(funded, bool) or not isinstance(funded, int) or funded < 0:
+        raise SleeveError("treasury amount is not a non-negative integer")
+    names = raw.get("sleeves")
+    expected = [sleeve.name for sleeve in SLEEVES]
+    if names is not None and (not isinstance(names, list) or names != expected):
+        raise SleeveError("treasury sleeves are not major, alt, and meme")
+    return funded
 
 
 def ledger_dir(root: Path, live: bool) -> Path:
@@ -59,7 +79,7 @@ def sleeve_symbols() -> tuple[str, ...]:
     out: list[str] = []
     for sleeve in SLEEVES:
         for symbol in sleeve.symbols:
-            if symbol in seen or not symbol.endswith("USDT") or len(symbol) <= 4:
+            if symbol in seen or not usdt_symbol_ok(symbol):
                 raise SleeveError(f"{symbol} is in more than one sleeve")
             seen.add(symbol)
             out.append(symbol)
@@ -69,16 +89,15 @@ def sleeve_symbols() -> tuple[str, ...]:
 def apply_funding(data_dir: Path, main_micro: int, live: bool = False) -> tuple[int, ...]:
     """Add only the new main-balance delta. Existing sleeve cash is kept."""
     sleeve_symbols()
-    if main_micro < 0:
-        raise SleeveError("main balance must be >= 0")
+    if isinstance(main_micro, bool) or not isinstance(main_micro, int) or main_micro < 0:
+        raise SleeveError("main balance must be an integer >= 0")
     data_dir = ledger_dir(data_dir, live)
     data_dir.mkdir(parents=True, exist_ok=True)
     treasury = data_dir / "treasury.json"
     funded = 0
     treasury_exists = treasury.exists()
     if treasury_exists:
-        raw = json.loads(treasury.read_text(encoding="utf-8"))
-        funded = int(raw["funded_micro"])
+        funded = _funded_micro(treasury)
     if main_micro < funded:
         raise SleeveError("main balance is below the amount already split; sleeve cash is not pulled back")
     parts: list[int] = []

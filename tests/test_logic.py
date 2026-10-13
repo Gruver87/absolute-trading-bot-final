@@ -279,6 +279,112 @@ def test_stop_take_and_trail() -> None:
         raise AssertionError("a zero stop must not treat a flat price as an exit")
 
 
+def test_a_dark_stretch_does_not_sell_a_loss(tmp_path, monkeypatch) -> None:
+    from spotbot.config import Config
+    from spotbot.engine import _close_positions, _now_sec
+    from spotbot.rules import SymbolRule
+    from spotbot.state import Book, Position
+
+    monkeypatch.setattr("spotbot.engine.venue_quotes", lambda _symbol: {})
+    entry = 100_000_000_000_000
+    down = 90_000_000_000_000
+    back = 101_000_000_000_000
+    cost = 100_000_000
+
+    class _Book:
+        def __init__(self, bid: int) -> None:
+            self.bid = bid
+
+        def symbol_rule(self, symbol: str) -> SymbolRule:
+            return SymbolRule(symbol, True, "", 5, 1, 1, 0, "BTC")
+
+        def book_top(self, _symbol: str) -> tuple[int, int]:
+            return self.bid, self.bid + 1
+
+    cfg = Config(
+        symbols=("BTCUSDT",),
+        paper_cash_micro=0,
+        interval_sec=60,
+        max_positions=1,
+        alloc_bps=10_000,
+        min_notional_micro=1_000_000,
+        rsi_buy=35,
+        stop_bps=350,
+        take_bps=700,
+        trail_arm_bps=300,
+        trail_gap_bps=200,
+        live=False,
+        mode="rsi",
+        taker_bps=5,
+        daily_loss_bps=500,
+        stop_cooldown_sec=900,
+        symbol_lock=True,
+        api_key="",
+        api_secret="",
+    )
+
+    def held(seen: int, bid: int, flat: bool = False) -> tuple[Book, int]:
+        book = Book(
+            cash_micro=0,
+            positions=[Position("BTCUSDT", entry, entry, cost, 100_000_000, "test", hold_flat=flat)],
+            realized_micro=0,
+            seen_at=seen,
+        )
+        closed, _marks, unmarked = _close_positions(cfg, _Book(bid), book, tmp_path / "gap.json", "book", True)
+        assert unmarked == ()
+        return book, closed
+
+    dark, closed = held(_now_sec() - 1_000, down)
+    assert closed == 0 and dark.cash_micro == 0 and dark.positions[0].hold_flat is True
+    still, closed = held(_now_sec(), down, flat=True)
+    assert closed == 0 and still.positions[0].hold_flat is True
+    clear, closed = held(_now_sec(), back, flat=True)
+    assert closed == 0 and clear.positions[0].hold_flat is False
+    online, closed = held(_now_sec(), down)
+    assert closed == 1 and online.positions == [] and online.cash_micro > 0
+    future, closed = held(_now_sec() + 60, down)
+    assert closed == 0 and future.positions[0].hold_flat is True
+    green, closed = held(_now_sec() - 1_000, 110_000_000_000_000)
+    assert closed == 0 and green.cash_micro == 0
+    assert green.positions[0].hold_flat is True and green.positions[0].peak_micro == entry
+
+    class _Slide:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def symbol_rule(self, symbol: str) -> SymbolRule:
+            return SymbolRule(symbol, True, "", 5, 1, 1, 0, "BTC")
+
+        def book_top(self, _symbol: str) -> tuple[int, int]:
+            self.calls += 1
+            bid = 108_000_000_000_000 if self.calls == 1 else down
+            return bid, bid + 1
+
+    rebound = Book(
+        cash_micro=0,
+        positions=[Position("BTCUSDT", entry, entry, cost, 100_000_000, "test", hold_flat=True)],
+        realized_micro=0,
+        seen_at=_now_sec(),
+    )
+    closed, _marks, unmarked = _close_positions(cfg, _Slide(), rebound, tmp_path / "gap.json", "book", True)
+    assert unmarked == () and closed == 0 and rebound.positions[0].hold_flat is True
+
+    import requests
+
+    from spotbot.mexc import MexcClient
+    import spotbot.oracle as oracle
+
+    assert MexcClient("", "", 5)._session().trust_env is False
+    oracle._LOCAL.session = None
+
+    def _down(*_args: object, **_kwargs: object) -> None:
+        raise requests.ConnectionError("link down")
+
+    monkeypatch.setattr("requests.Session.get", _down)
+    assert oracle.venue_quotes("BTCUSDT") == {}
+    assert oracle._LOCAL.session is not None and oracle._LOCAL.session.trust_env is False
+
+
 def test_lift_needs_volume_and_bids() -> None:
     volumes = [100] * 12 + [400, 100]
     assert volume_ratio_bps(volumes) == 40_000
@@ -980,6 +1086,223 @@ def test_named_rows_and_the_trade_list() -> None:
         raise AssertionError("a negative balance must be refused")
 
 
+def test_band_clock_journal_and_the_day(tmp_path) -> None:
+    from datetime import datetime, timedelta, timezone
+
+    from spotbot.engine import _now_ms, _now_sec
+    from spotbot.guards import drawdown_blocks
+    from spotbot.journal import note_quote
+    from spotbot.mexc import rank_liquid
+    from spotbot.signals import below_lower_band
+    from spotbot.state import Book, LedgerError, Position, audit_book
+
+    assert below_lower_band([10**17 + i for i in range(20)]) is False
+    assert drawdown_blocks(1_000_000, -1, 1_000) is True
+    assert _now_ms() // 1000 == _now_sec() or _now_ms() // 1000 == _now_sec() - 1
+
+    (tmp_path / "ops_quotes.json").write_text("{", encoding="utf-8")
+    note_quote(tmp_path, "BTCUSDT", "1", "-", "-", "-", None, None)
+    saved = (tmp_path / "ops_quotes.json").read_text(encoding="utf-8")
+    assert "BTCUSDT" in saved and saved.strip().endswith("}")
+
+    rows = rank_liquid(
+        [
+            {"symbol": "btcusdt", "quoteVolume": "100", "priceChangePercent": "1"},
+            {"symbol": "ETHUSDT", "quoteVolume": "50", "priceChangePercent": "1"},
+            {"symbol": "ETHUSDT", "quoteVolume": "80", "priceChangePercent": "1"},
+            {"symbol": "XRPUSDT", "quoteVolume": "90", "priceChangePercent": ""},
+        ],
+        1,
+        50,
+        200,
+        8,
+    )
+    assert rows == ["ETHUSDT"]
+
+    low = Book(
+        cash_micro=1,
+        positions=[Position("btcUSDT", 1, 1, 1, 1, "x")],
+        realized_micro=0,
+    )
+    try:
+        audit_book(low)
+    except LedgerError as exc:
+        assert "USDT" in str(exc)
+    else:
+        raise AssertionError("a lowercase pair must not open")
+    tomorrow = (datetime.now(timezone.utc).date() + timedelta(days=1)).isoformat()
+    ahead = Book(cash_micro=1, positions=[], realized_micro=0, guard_day=tomorrow)
+    try:
+        audit_book(ahead)
+    except LedgerError as exc:
+        assert "future" in str(exc)
+    else:
+        raise AssertionError("a future guard day must not open")
+
+
+def test_treasury_and_a_repeated_market_row(tmp_path) -> None:
+    from spotbot.mexc import MexcClient, MexcError, depth_notionals, parse_account
+    from spotbot.ops_http import OpsError, _Handler, parse_ops_port
+    from spotbot.sleeves import SleeveError, apply_funding
+    from spotbot.state import LedgerError, load_book
+
+    paper = tmp_path / "paper"
+    paper.mkdir()
+    (paper / "treasury.json").write_text('{"funded_micro": true}', encoding="utf-8")
+    try:
+        apply_funding(tmp_path, 100_000_000)
+    except SleeveError as exc:
+        assert "integer" in str(exc)
+    else:
+        raise AssertionError("a boolean treasury must not add cash")
+    assert not (paper / "sleeve_major.json").exists()
+    (paper / "treasury.json").write_text('{"funded_micro": -1}', encoding="utf-8")
+    try:
+        apply_funding(tmp_path, 100_000_000)
+    except SleeveError as exc:
+        assert "integer" in str(exc)
+    else:
+        raise AssertionError("a negative treasury must not add cash")
+    (paper / "treasury.json").write_text("{", encoding="utf-8")
+    try:
+        apply_funding(tmp_path, 100_000_000)
+    except SleeveError as exc:
+        assert "not json" in str(exc)
+    else:
+        raise AssertionError("a broken treasury must not add cash")
+
+    book_path = tmp_path / "book.json"
+    book_path.write_text("{", encoding="utf-8")
+    try:
+        load_book(book_path, 1)
+    except LedgerError as exc:
+        assert "not json" in str(exc)
+    else:
+        raise AssertionError("a broken book must not open")
+    assert book_path.read_text(encoding="utf-8") == "{"
+
+    client = MexcClient("", "", 5)
+    try:
+        client.market_buy_quote("BTCUSDT", 0, "a" * 32)
+    except MexcError as exc:
+        assert "positive size" in str(exc)
+    else:
+        raise AssertionError("a zero buy must not be sent")
+    client._public = lambda _path, _params: {"symbols": [{"symbol": "BTCUSDT"}, {"symbol": "BTCUSDT"}]}  # type: ignore[method-assign]
+    try:
+        client.symbol_rule("BTCUSDT")
+    except MexcError as exc:
+        assert "more than one" in str(exc)
+    else:
+        raise AssertionError("two exchangeInfo rows must be refused")
+    assert "BTCUSDT" not in client._rules
+
+    try:
+        parse_account({"balances": [{"asset": "BTC", "free": "1", "locked": "0"}, {"asset": "btc", "free": "1", "locked": "0"}]})
+    except MexcError as exc:
+        assert "repeated" in str(exc)
+    else:
+        raise AssertionError("the same coin twice must not be summed")
+    try:
+        depth_notionals({"bids": [["1", "1"], ["1", "2"]], "asks": [["2", "1"]]}, "BTCUSDT")
+    except MexcError as exc:
+        assert "repeated" in str(exc)
+    else:
+        raise AssertionError("the same depth price twice must be refused")
+    try:
+        parse_ops_port("18180")
+    except OpsError as exc:
+        assert "18180" in str(exc)
+    else:
+        raise AssertionError("the mesh port must be refused")
+    try:
+        parse_ops_port("nope")
+    except OpsError as exc:
+        assert "integer" in str(exc)
+    else:
+        raise AssertionError("a named port must be refused")
+
+    class _Fake:
+        def _send(self, code: int, _content_type: str, body: bytes) -> None:
+            self.code = code
+            self.body = body
+
+    fake = _Fake()
+    _Handler.do_PUT(fake)  # type: ignore[arg-type]
+    assert fake.code == 405 and fake.body == b"read only"
+
+
+def test_redirects_bools_and_a_missing_field() -> None:
+    from spotbot.fees import fee_on
+    from spotbot.mexc import MexcError, depth_notionals
+    from spotbot.reconcile import order_is_ours
+    from spotbot.rules import round_base_atoms, round_quote_micro
+    from spotbot.sleeves import SleeveError, split_equal
+    from spotbot.state import LedgerError, Position, load_book
+
+    ack = {
+        "symbol": "BTCUSDT",
+        "side": "BUY",
+        "type": "MARKET",
+        "clientOrderId": "abc",
+        "origClientOrderId": "other",
+    }
+    assert order_is_ours(ack, "BTCUSDT", "BUY", "abc") is False
+    try:
+        depth_notionals(
+            {"lastUpdateId": 0, "bids": [["1", "1"]], "asks": [["2", "1"]]},
+            "BTCUSDT",
+        )
+    except MexcError as exc:
+        assert "update" in str(exc)
+    else:
+        raise AssertionError("a depth without an update id must be refused")
+    try:
+        fee_on(1_000_000, True)
+    except ValueError as exc:
+        assert "integer" in str(exc)
+    else:
+        raise AssertionError("a boolean fee must be refused")
+    assert round_base_atoms(100, True) == 0
+    assert round_quote_micro(100, True) == 0
+    try:
+        split_equal(True, 3)
+    except SleeveError as exc:
+        assert "integer" in str(exc)
+    else:
+        raise AssertionError("a boolean split must be refused")
+    try:
+        Position.from_json({"symbol": "BTCUSDT"})
+    except LedgerError as exc:
+        assert "missing" in str(exc)
+    else:
+        raise AssertionError("a position without a price must not open")
+    import json
+    import tempfile
+    from pathlib import Path
+
+    from spotbot.sleeves import apply_funding
+
+    with tempfile.TemporaryDirectory() as folder:
+        root = Path(folder)
+        book_path = root / "book.json"
+        book_path.write_text(json.dumps({"positions": []}), encoding="utf-8")
+        try:
+            load_book(book_path, 1)
+        except LedgerError as exc:
+            assert "missing" in str(exc)
+        else:
+            raise AssertionError("a book without cash must not open")
+        assert book_path.read_text(encoding="utf-8").startswith("{")
+        try:
+            apply_funding(root, True)
+        except SleeveError as exc:
+            assert "integer" in str(exc)
+        else:
+            raise AssertionError("a boolean main balance must not fund the sleeves")
+        assert not (root / "paper" / "sleeve_major.json").exists()
+
+
 def test_pair_limits_round_up_and_a_zero_fee_is_not_stuck() -> None:
     from spotbot.mexc import ack_commission
     from spotbot.rules import parse_symbol_rule
@@ -1498,15 +1821,19 @@ def test_account_must_match_the_book() -> None:
     assert base_is_free(1_000_000, 2_000_000) is False
     from spotbot.mexc import MexcError
 
-    again = parse_account(
-        {
-            "balances": [
-                {"asset": "BTC", "free": "0.01", "locked": "0"},
-                {"asset": "BTC", "free": "0.01", "locked": "0"},
-            ]
-        }
-    )
-    assert again[2]["BTC"] == 2_000_000
+    try:
+        parse_account(
+            {
+                "balances": [
+                    {"asset": "BTC", "free": "0.01", "locked": "0"},
+                    {"asset": "BTC", "free": "0.01", "locked": "0"},
+                ]
+            }
+        )
+    except MexcError as exc:
+        assert "repeated" in str(exc)
+    else:
+        raise AssertionError("the same coin twice must not be summed")
     try:
         parse_account({"balances": ["BTC"]})
     except MexcError:

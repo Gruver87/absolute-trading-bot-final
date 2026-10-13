@@ -146,25 +146,7 @@ class MexcClient:
         payload = self._public("/api/v3/ticker/24hr", {})
         if not isinstance(payload, list):
             raise MexcError("24h ticker is not a list")
-        ranked: list[tuple[int, str]] = []
-        for item in payload:
-            if not isinstance(item, dict):
-                continue
-            symbol = str(item.get("symbol") or "")
-            if not symbol.endswith("USDT"):
-                continue
-            try:
-                quote = parse_micro(str(item.get("quoteVolume") or "0"))
-                change_bps = int(DecimalChange(str(item.get("priceChangePercent") or "0")))
-            except (MoneyError, ValueError):
-                continue
-            if quote < min_quote_micro:
-                continue
-            if change_bps < change_min_bps or change_bps > change_max_bps:
-                continue
-            ranked.append((quote, symbol))
-        ranked.sort(reverse=True)
-        return [symbol for _, symbol in ranked[:cap]]
+        return rank_liquid(payload, min_quote_micro, change_min_bps, change_max_bps, cap)
 
     def price(self, symbol: str) -> int:
         payload = self._public("/api/v3/ticker/price", {"symbol": symbol})
@@ -187,6 +169,8 @@ class MexcClient:
         rows = payload.get("symbols")
         if not isinstance(rows, list) or not rows or not isinstance(rows[0], dict):
             raise MexcError(f"no exchangeInfo row for {symbol}")
+        if len(rows) != 1:
+            raise MexcError(f"exchangeInfo for {symbol} has more than one row")
         if str(rows[0].get("symbol") or "") != symbol:
             raise MexcError(f"exchangeInfo is not {symbol}")
         rule = parse_symbol_rule(rows[0])
@@ -195,6 +179,7 @@ class MexcClient:
 
     def market_buy_quote(self, symbol: str, quote_micro: int, client_order_id: str) -> OrderFill:
         """Spend quote_micro USDT. The client id is stored so a restart can find the order."""
+        _order_request(symbol, client_order_id, quote_micro)
         body = self._signed(
             "POST",
             "/api/v3/order",
@@ -229,6 +214,7 @@ class MexcClient:
 
     def market_sell_base(self, symbol: str, base_atoms: int, client_order_id: str) -> OrderFill:
         """Return the quote credit. USDT commission is included when the ack carries it."""
+        _order_request(symbol, client_order_id, base_atoms)
         body = self._signed(
             "POST",
             "/api/v3/order",
@@ -287,14 +273,19 @@ class MexcClient:
         session = getattr(self._local, "session", None)
         if session is None:
             session = requests.Session()
+            session.trust_env = False
             self._local.session = session
         return session
 
     def _public(self, path: str, params: dict[str, str]) -> Any:
         try:
-            response = self._session().get(BASE + path, params=params, timeout=self._timeout)
+            response = self._session().get(
+                BASE + path, params=params, timeout=self._timeout, allow_redirects=False
+            )
         except requests.RequestException as exc:
             raise MexcError(str(exc)) from exc
+        if response.status_code in (301, 302, 303, 307, 308):
+            raise MexcError(f"{path} redirect is refused")
         if response.status_code in (403, 418, 429):
             _raise_limited(path, response.status_code, response.headers.get("Retry-After", ""))
         if response.status_code != 200:
@@ -315,14 +306,26 @@ class MexcClient:
         url = f"{BASE}{path}?{encoded}&signature={signature}"
         headers = {"X-MEXC-APIKEY": self._key}
         try:
-            response = self._session().request(method, url, headers=headers, timeout=self._timeout)
+            response = self._session().request(
+                method, url, headers=headers, timeout=self._timeout, allow_redirects=False
+            )
         except requests.RequestException as exc:
             raise MexcError(str(exc)) from exc
+        if response.status_code in (301, 302, 303, 307, 308):
+            raise MexcError("order redirect is refused")
         if response.status_code in (403, 418, 429):
             _raise_limited("order", response.status_code, response.headers.get("Retry-After", ""))
         if response.status_code != 200:
             raise MexcError(f"order HTTP {response.status_code}: {response.text[:180]}")
         return signed_payload(_json_body(response, "order"), as_list)
+
+
+def _order_request(symbol: str, client_order_id: str, size: int) -> None:
+    """Refuse a send that has no pair, no client id, or no positive size."""
+    from spotbot.state import client_id_ok, usdt_symbol_ok
+
+    if not usdt_symbol_ok(symbol) or not client_id_ok(client_order_id) or isinstance(size, bool) or not isinstance(size, int) or size <= 0:
+        raise MexcError("order is missing a pair, a client id, or a positive size")
 
 
 def signed_payload(body: object, as_list: bool) -> Any:
@@ -353,6 +356,46 @@ def _interval_ms(interval: str) -> int:
     return span
 
 
+def rank_liquid(
+    payload: object,
+    min_quote_micro: int,
+    change_min_bps: int,
+    change_max_bps: int,
+    cap: int,
+) -> list[str]:
+    """USDT names with a real volume and a real percent. A missing percent is not zero."""
+    from spotbot.state import usdt_symbol_ok
+
+    if not isinstance(payload, list):
+        raise MexcError("24h ticker is not a list")
+    if cap < 1:
+        return []
+    best: dict[str, int] = {}
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        symbol = str(item.get("symbol") or "")
+        if not usdt_symbol_ok(symbol):
+            continue
+        raw_quote = item.get("quoteVolume")
+        raw_change = item.get("priceChangePercent")
+        if raw_quote in (None, "") or raw_change in (None, ""):
+            continue
+        try:
+            quote = parse_micro(str(raw_quote))
+            change_bps = DecimalChange(str(raw_change))
+        except (MoneyError, ValueError):
+            continue
+        if quote < min_quote_micro:
+            continue
+        if change_bps < change_min_bps or change_bps > change_max_bps:
+            continue
+        if symbol not in best or quote > best[symbol]:
+            best[symbol] = quote
+    ranked = sorted(best.items(), key=lambda row: (-row[1], row[0]))
+    return [symbol for symbol, _quote in ranked[:cap]]
+
+
 def ticker_price(payload: object, symbol: str) -> int:
     """Last price only when the row names the requested pair."""
     if not isinstance(payload, dict) or "price" not in payload:
@@ -378,6 +421,7 @@ def depth_notionals(payload: object, symbol: str) -> tuple[int, int]:
         raise MexcError(f"empty depth for {symbol}")
     if min(price for price, _notional in asks) < max(price for price, _notional in bids):
         raise MexcError(f"crossed depth for {symbol}")
+    positive_int(payload.get("lastUpdateId"), f"depth update for {symbol}")
     return sum(notional for _price, notional in bids), sum(notional for _price, notional in asks)
 
 
@@ -434,6 +478,8 @@ def _depth_side(levels: object) -> list[tuple[int, int]]:
             raise MexcError("depth level is not decimal") from exc
         if qty_micro <= 0:
             continue
+        if any(price == seen for seen, _notional in rows):
+            raise MexcError("depth price is repeated")
         atoms = qty_micro * (BASE_ATOMS // MICRO)
         rows.append((price, notional_micro(atoms, price)))
     return rows
@@ -678,6 +724,7 @@ def parse_account(payload: dict[str, Any]) -> tuple[int, int, dict[str, int], di
     free_usdt = 0
     bases: dict[str, int] = {}
     free_bases: dict[str, int] = {}
+    seen: set[str] = set()
     for row in rows:
         if not isinstance(row, dict):
             raise MexcError("balance row is not an object")
@@ -690,6 +737,9 @@ def parse_account(payload: dict[str, Any]) -> tuple[int, int, dict[str, int], di
             if free or locked:
                 raise MexcError("balance row has no asset")
             continue
+        if asset in seen:
+            raise MexcError("balance asset is repeated")
+        seen.add(asset)
         if asset == "USDT":
             free_usdt += free
             total_usdt += free + locked

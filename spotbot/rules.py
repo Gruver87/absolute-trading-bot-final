@@ -61,7 +61,7 @@ def parse_symbol_rule(row: dict[str, object]) -> SymbolRule:
 
 
 def round_base_atoms(atoms: int, step_atoms: int) -> int:
-    if atoms <= 0 or step_atoms <= 0:
+    if isinstance(atoms, bool) or isinstance(step_atoms, bool) or atoms <= 0 or step_atoms <= 0:
         return 0
     return atoms // step_atoms * step_atoms
 
@@ -73,7 +73,7 @@ def uses_slot(base_atoms: int, step_atoms: int) -> bool:
 
 def round_quote_micro(amount_micro: int, step_micro: int) -> int:
     """Floor the quote spend to the market minimum step from exchangeInfo."""
-    if amount_micro <= 0 or step_micro <= 0:
+    if isinstance(amount_micro, bool) or isinstance(step_micro, bool) or amount_micro <= 0 or step_micro <= 0:
         return 0
     return amount_micro // step_micro * step_micro
 

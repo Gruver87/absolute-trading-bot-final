@@ -113,7 +113,7 @@ def run_cycle(
         open_loss = 0 if exit_fees is None else open_loss_micro(book.positions, marks, exit_fees)
         unpriced = bool(book.positions) and equity is None
         halt = bool(unmarked) or unpriced or _entries_halted(book, cfg.daily_loss_bps, open_loss) or drawn
-        cooled = book.cooldown_until > int(time.time())
+        cooled = book.cooldown_until > _now_sec()
         conflict = _account_conflict(client, book, sibling_paths) if cfg.live else None
         if halt:
             if unmarked:
@@ -232,6 +232,67 @@ def _recheck_ask(
     return ask
 
 
+def _unseen(book: Book, now: int, interval_sec: int) -> bool:
+    """True when the last good read is too old or stamped in the future.
+
+    A missing stamp is not a gap: the book has never been marked.
+    """
+    if book.seen_at <= 0:
+        return False
+    if book.seen_at > now:
+        return True
+    return now - book.seen_at > max(interval_sec * 2, 180)
+
+
+def _under_cost(client: MexcClient, pos: Position, bid: int) -> bool | None:
+    """True when a sell at this bid would return less than the coins cost. None if the fee is unknown."""
+    try:
+        taker_bps = client.symbol_rule(pos.symbol).taker_bps
+    except MexcRateLimit:
+        raise
+    except MexcError:
+        return None
+    gross = notional_micro(pos.base_atoms, bid)
+    credit, fee = paper_sell(pos.base_atoms, bid, taker_bps)
+    if credit < 0 or fee < 0 or credit + fee != gross:
+        return None
+    return credit < pos.quote_micro
+
+
+def _gap_hold(cfg: Config, client: MexcClient, book: Book, pos: Position, bid: int) -> bool:
+    """After a dark stretch, a bid under cost is not sold. The hold stays until the bid covers the cost."""
+    under = _under_cost(client, pos, bid)
+    dark = _unseen(book, _now_sec(), cfg.interval_sec)
+    if dark:
+        pos.hold_flat = True
+        LOG.warning("gap hold %s, the book was dark", pos.symbol)
+        return True
+    if under is None and (dark or pos.hold_flat):
+        pos.hold_flat = True
+        LOG.warning("gap hold %s, the sell fee is unknown", pos.symbol)
+        return True
+    if under and (dark or pos.hold_flat):
+        pos.hold_flat = True
+        LOG.warning("gap hold %s, the bid is under the cost", pos.symbol)
+        return True
+    if pos.hold_flat and under is False:
+        pos.hold_flat = False
+        LOG.info("gap hold cleared %s, the bid covers the cost", pos.symbol)
+    return False
+
+
+def _rearm_if_under(client: MexcClient, pos: Position, bid: int, armed: bool) -> bool:
+    """The confirm bid fell back under cost. The hold returns and the order is not sent."""
+    if not armed:
+        return False
+    under = _under_cost(client, pos, bid)
+    if under is False:
+        return False
+    pos.hold_flat = True
+    LOG.warning("gap hold %s, the confirm bid is under the cost", pos.symbol)
+    return True
+
+
 def _close_positions(
     cfg: Config,
     client: MexcClient,
@@ -264,6 +325,10 @@ def _close_positions(
             kept.append(pos)
             continue
         marks[pos.symbol] = price
+        armed = pos.hold_flat or _unseen(book, _now_sec(), cfg.interval_sec)
+        if _gap_hold(cfg, client, book, pos, price):
+            kept.append(pos)
+            continue
         if price > pos.peak_micro:
             pos.peak_micro = price
         if dust:
@@ -295,17 +360,24 @@ def _close_positions(
             continue
         fresh_reason, fresh_bid, bad_mark = _confirm_exit(client, pos, reason, stop, take, arm, gap)
         if bad_mark:
+            if armed:
+                pos.hold_flat = True
+                LOG.warning("gap hold %s, the confirm bid is unreadable", pos.symbol)
             LOG.warning("price refused, position kept: %s", pos.symbol)
             unmarked.append(pos.symbol)
             kept.append(pos)
             continue
         if fresh_reason is None:
+            _rearm_if_under(client, pos, fresh_bid, armed)
             LOG.info("exit cancelled, the next bid no longer exits %s", pos.symbol)
             kept.append(pos)
             continue
         reason = fresh_reason
         price = fresh_bid
         marks[pos.symbol] = fresh_bid
+        if _rearm_if_under(client, pos, price, armed):
+            kept.append(pos)
+            continue
         if cfg.live and not orders_allowed:
             LOG.warning("sell kept, live orders paused: %s", pos.symbol)
             kept.append(pos)
@@ -342,17 +414,24 @@ def _close_positions(
                 continue
             fresh_reason, fresh_bid, bad_mark = _confirm_exit(client, pos, reason, stop, take, arm, gap)
             if bad_mark:
+                if armed:
+                    pos.hold_flat = True
+                    LOG.warning("gap hold %s, the confirm bid is unreadable", pos.symbol)
                 LOG.warning("price refused, position kept: %s", pos.symbol)
                 unmarked.append(pos.symbol)
                 kept.append(pos)
                 continue
             if fresh_reason is None:
+                _rearm_if_under(client, pos, fresh_bid, armed)
                 LOG.info("exit cancelled, the next bid no longer exits %s", pos.symbol)
                 kept.append(pos)
                 continue
             reason = fresh_reason
             price = fresh_bid
             marks[pos.symbol] = fresh_bid
+            if _rearm_if_under(client, pos, price, armed):
+                kept.append(pos)
+                continue
             client_id = new_client_order_id(pos.symbol, "S")
             remember_pending(book, client_id, pos.symbol, "SELL", sell_atoms)
             book.pending_open_base = pos.base_atoms
@@ -448,17 +527,24 @@ def _close_positions(
             continue
         fresh_reason, fresh_bid, bad_mark = _confirm_exit(client, pos, reason, stop, take, arm, gap)
         if bad_mark:
+            if armed:
+                pos.hold_flat = True
+                LOG.warning("gap hold %s, the confirm bid is unreadable", pos.symbol)
             LOG.warning("price refused, position kept: %s", pos.symbol)
             unmarked.append(pos.symbol)
             kept.append(pos)
             continue
         if fresh_reason is None:
+            _rearm_if_under(client, pos, fresh_bid, armed)
             LOG.info("exit cancelled, the next bid no longer exits %s", pos.symbol)
             kept.append(pos)
             continue
         reason = fresh_reason
         price = fresh_bid
         marks[pos.symbol] = fresh_bid
+        if _rearm_if_under(client, pos, price, armed):
+            kept.append(pos)
+            continue
         credit, fee = paper_sell(sell_atoms, price, taker_bps)
         gross = notional_micro(sell_atoms, price)
         if credit <= 0 or fee < 0 or credit + fee != gross:
@@ -482,6 +568,8 @@ def _close_positions(
             price=format_price(price),
         )
     book.positions = kept
+    if not unmarked:
+        book.seen_at = _now_sec()
     return closed, marks, tuple(unmarked)
 
 
@@ -718,7 +806,7 @@ def _try_buy(
     if symbol not in cfg.symbols:
         LOG.info("skip %s: not in the configured list", symbol)
         return False
-    if pair_locked(book, symbol, int(time.time())):
+    if pair_locked(book, symbol, _now_sec()):
         LOG.info("skip %s: pair locked after stops", symbol)
         return False
     if time.monotonic() > deadline:
@@ -1168,7 +1256,7 @@ def _clock_ok(client: MexcClient) -> bool:
     except MexcError as exc:
         LOG.warning("server time unread, live orders paused: %s", exc)
         return False
-    if clock_allows(int(time.time() * 1000), server_ms, CLOCK_SKEW_MS):
+    if clock_allows(_now_ms(), server_ms, CLOCK_SKEW_MS):
         return True
     LOG.warning("clock skew against MEXC, live orders paused")
     return False
@@ -1186,9 +1274,9 @@ def mark_stop_cooldown(
     if reason != "stop":
         return
     if seconds > 0:
-        book.cooldown_until = int(time.time()) + seconds
+        book.cooldown_until = _now_sec() + seconds
     if symbol:
-        note_pair_stop(book, symbol, int(time.time()), lock_count, lock_sec)
+        note_pair_stop(book, symbol, _now_sec(), lock_count, lock_sec)
 
 
 def open_loss_micro(
@@ -1217,6 +1305,16 @@ def open_loss_micro(
         if value < pos.quote_micro:
             loss += pos.quote_micro - value
     return loss
+
+
+def _now_ms() -> int:
+    """Milliseconds from the integer clock. The signed request uses the same clock."""
+    return time.time_ns() // 1_000_000
+
+
+def _now_sec() -> int:
+    """Seconds from the integer clock. A float second is not a timestamp."""
+    return time.time_ns() // 1_000_000_000
 
 
 def trading_day() -> str:

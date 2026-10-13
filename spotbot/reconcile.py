@@ -91,13 +91,17 @@ def order_is_ours(body: dict[str, object], symbol: str, side: str, client_id: st
     """True only when the ack is the symbol, side, and client id we sent."""
     if not symbol or not side or not client_id:
         return False
-    got_client = str(
-        body.get("clientOrderId") or body.get("origClientOrderId") or body.get("newClientOrderId") or ""
-    )
+    ids = [
+        str(body.get(key))
+        for key in ("clientOrderId", "origClientOrderId", "newClientOrderId")
+        if body.get(key) not in (None, "")
+    ]
+    if not ids or any(item != client_id for item in ids):
+        return False
     got_symbol = str(body.get("symbol") or "")
     got_side = str(body.get("side") or "").upper()
     got_type = str(body.get("type") or "").upper()
-    return got_client == client_id and got_symbol == symbol and got_side == side.upper() and got_type == "MARKET"
+    return ids[0] == client_id and got_symbol == symbol and got_side == side.upper() and got_type == "MARKET"
 
 
 class FeeAssetError(ValueError):

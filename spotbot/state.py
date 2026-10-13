@@ -33,6 +33,7 @@ class Position:
     reason: str
     client_order_id: str = ""
     exchange_order_id: str = ""
+    hold_flat: bool = False
 
     def to_json(self) -> dict[str, object]:
         return asdict(self)
@@ -41,6 +42,9 @@ class Position:
     def from_json(cls, raw: dict[str, object]) -> "Position":
         if not isinstance(raw, dict):
             raise LedgerError("position is not an object")
+        for key in ("symbol", "entry_micro", "peak_micro", "quote_micro", "base_atoms", "reason"):
+            if key not in raw:
+                raise LedgerError("position is missing a field")
         return cls(
             symbol=str(raw["symbol"]),
             entry_micro=_as_int(raw["entry_micro"], "entry_micro"),
@@ -50,6 +54,7 @@ class Position:
             reason=str(raw["reason"]),
             client_order_id=str(raw.get("client_order_id") or ""),
             exchange_order_id=str(raw.get("exchange_order_id") or ""),
+            hold_flat=_flag(raw.get("hold_flat", False), "gap hold"),
         )
 
 
@@ -84,6 +89,7 @@ class Book:
     pair_stops: dict[str, list[int]] | None = None
     pair_lock_until: dict[str, int] | None = None
     price_scale: int = 0
+    seen_at: int = 0
 
     def to_json(self) -> dict[str, object]:
         body: dict[str, object] = {
@@ -112,6 +118,7 @@ class Book:
             "pair_stops": self.pair_stops or {},
             "pair_lock_until": self.pair_lock_until or {},
             "price_scale": self.price_scale or 1_000_000_000_000,
+            "seen_at": self.seen_at,
             "positions": [pos.to_json() for pos in self.positions],
         }
         if self.credited_main_micro is not None:
@@ -121,6 +128,12 @@ class Book:
         if self.pending_ack_base_fee is not None:
             body["pending_ack_base_fee"] = self.pending_ack_base_fee
         return body
+
+
+def _flag(value: object, label: str) -> bool:
+    if not isinstance(value, bool):
+        raise LedgerError(f"{label} is not a flag")
+    return value
 
 
 def _as_int(value: object, label: str) -> int:
@@ -153,9 +166,14 @@ def _pair_locks(raw: object) -> dict[str, int]:
 def load_book(path: Path, paper_cash_micro: int) -> Book:
     if not path.exists():
         return Book(cash_micro=paper_cash_micro, positions=[], realized_micro=0, fees_micro=0)
-    raw = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise LedgerError("book is not json") from exc
     if not isinstance(raw, dict):
         raise LedgerError("book is not an object")
+    if "cash_micro" not in raw:
+        raise LedgerError("book is missing a field")
     rows = raw.get("positions", [])
     if not isinstance(rows, list):
         raise LedgerError("positions are not a list")
@@ -193,6 +211,7 @@ def load_book(path: Path, paper_cash_micro: int) -> Book:
         pair_stops=_pair_stops(raw.get("pair_stops")),
         pair_lock_until=_pair_locks(raw.get("pair_lock_until")),
         price_scale=1_000_000_000_000,
+        seen_at=_as_int(raw.get("seen_at", 0), "seen_at"),
         credited_main_micro=_as_int(raw["credited_main_micro"], "credited_main_micro") if "credited_main_micro" in raw else None,
         pending_ack_fee=_as_int(raw["pending_ack_fee"], "pending_ack_fee") if "pending_ack_fee" in raw else None,
         pending_ack_base_fee=_as_int(raw["pending_ack_base_fee"], "pending_ack_base_fee") if "pending_ack_base_fee" in raw else None,
@@ -233,8 +252,29 @@ def _audit_pair_map(stops: dict[str, list[int]], locks: dict[str, int]) -> None:
 
 
 def _audit_pair_symbol(symbol: str) -> None:
-    if not symbol.endswith("USDT") or len(symbol) <= 4 or not symbol[:-4].isalnum() or not symbol[:-4].isupper():
+    if not usdt_symbol_ok(symbol):
         raise LedgerError(f"{symbol or 'missing'} is not a USDT pair")
+
+
+def usdt_symbol_ok(symbol: str) -> bool:
+    """A spot pair is uppercase letters and digits, quoted in USDT."""
+    return bool(symbol.endswith("USDT") and len(symbol) > 4 and symbol[:-4].isalnum() and symbol[:-4].isupper())
+
+
+def _guard_day_ok(day: str) -> None:
+    """An empty day is a new book. A future day would wipe the daily halt."""
+    if day == "":
+        return
+    from datetime import date, datetime, timezone
+
+    try:
+        parsed = date.fromisoformat(day)
+    except ValueError as exc:
+        raise LedgerError("guard day is not a date") from exc
+    if parsed.isoformat() != day:
+        raise LedgerError("guard day is not a date")
+    if parsed > datetime.now(timezone.utc).date():
+        raise LedgerError("guard day is in the future")
 
 
 def audit_book(book: Book) -> None:
@@ -251,6 +291,8 @@ def audit_book(book: Book) -> None:
         raise LedgerError("pending exchange order id is not digits")
     if book.pending_client_id and (not book.pending_symbol.endswith("USDT") or len(book.pending_symbol) <= 4):
         raise LedgerError("pending symbol is not a USDT pair")
+    if book.pending_symbol:
+        _audit_pair_symbol(book.pending_symbol)
     if not book.pending_client_id and (
         book.pending_applied_atoms
         or book.pending_applied_quote
@@ -274,8 +316,11 @@ def audit_book(book: Book) -> None:
             raise LedgerError(f"{label} is negative")
     if book.cooldown_until > 4_102_444_800:
         raise LedgerError("cooldown is not a timestamp")
+    if book.seen_at < 0 or book.seen_at > 4_102_444_800:
+        raise LedgerError("seen time is not a timestamp")
     if book.equity_peak_micro < 0:
         raise LedgerError("equity peak is negative")
+    _guard_day_ok(book.guard_day)
     _audit_pair_map(book.pair_stops or {}, book.pair_lock_until or {})
     if book.credited_main_micro is not None and book.credited_main_micro < 0:
         raise LedgerError("credited main is negative")
@@ -303,6 +348,7 @@ def audit_book(book: Book) -> None:
     for pos in book.positions:
         if not pos.symbol.endswith("USDT") or len(pos.symbol) <= 4:
             raise LedgerError(f"{pos.symbol or 'missing'} is not a USDT pair")
+        _audit_pair_symbol(pos.symbol)
         if pos.symbol in seen_symbols:
             raise LedgerError(f"{pos.symbol} is on the book twice")
         seen_symbols.add(pos.symbol)
@@ -310,6 +356,8 @@ def audit_book(book: Book) -> None:
             raise LedgerError(f"{pos.symbol} size or price is not positive")
         if pos.peak_micro < pos.entry_micro:
             raise LedgerError(f"{pos.symbol} peak is below the entry")
+        if not isinstance(pos.hold_flat, bool):
+            raise LedgerError("gap hold is not a flag")
         if book.pending_side == "SELL" and book.pending_client_id and pos.client_order_id == book.pending_client_id:
             raise LedgerError("sell client id is already on a position")
         if (

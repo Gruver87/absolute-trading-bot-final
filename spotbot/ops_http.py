@@ -20,7 +20,19 @@ class OpsError(RuntimeError):
     """Refused ops bind."""
 
 
+def parse_ops_port(raw: str) -> int:
+    """A digit string only. A name or a fraction is not a port."""
+    text = raw.strip()
+    if not text.isdigit():
+        raise OpsError("ops port must be an integer")
+    port = int(text)
+    check_ops_port(port)
+    return port
+
+
 def check_ops_port(port: int) -> None:
+    if isinstance(port, bool) or not isinstance(port, int):
+        raise OpsError("ops port must be an integer")
     if port in MESH_PORTS:
         raise OpsError(f"refusing port {port}: 18180-18182 is the DUP mesh")
     if port < 1024 or port > 65535:
@@ -79,6 +91,10 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         self._send(405, "text/plain; charset=utf-8", b"read only")
+
+    do_PUT = do_POST
+    do_DELETE = do_POST
+    do_PATCH = do_POST
 
     def log_message(self, fmt: str, *args: object) -> None:
         return

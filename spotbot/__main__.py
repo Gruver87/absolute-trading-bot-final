@@ -16,7 +16,7 @@ from spotbot.analyzer import backend
 from spotbot.config import ConfigError, load_config
 from spotbot.engine import run_cycle
 from spotbot.mexc import MexcClient, MexcError, MexcRateLimit, backoff_sec
-from spotbot.ops_http import DEFAULT_PORT, OpsError, check_ops_port, serve
+from spotbot.ops_http import DEFAULT_PORT, OpsError, parse_ops_port, serve
 from spotbot.sleeves import SleeveError, ledger_dir, run_sleeves
 from spotbot.state import LedgerError
 
@@ -51,9 +51,8 @@ def main(argv: list[str] | None = None) -> int:
         logging.error("%s", exc)
         return 2
     if args.ops:
-        ops_port = int(os.environ.get("SPOT_OPS_PORT", str(DEFAULT_PORT)))
         try:
-            check_ops_port(ops_port)
+            ops_port = parse_ops_port(os.environ.get("SPOT_OPS_PORT", str(DEFAULT_PORT)))
         except OpsError as exc:
             logging.error("%s", exc)
             return 2
@@ -79,6 +78,11 @@ def main(argv: list[str] | None = None) -> int:
                 if args.once:
                     return 1
                 pause = cfg.interval_sec
+            except OSError as exc:
+                logging.error("cycle paused, the link failed: %s", exc)
+                if args.once:
+                    return 1
+                pause = cfg.interval_sec
             else:
                 pause = cfg.interval_sec
             if args.once:
@@ -100,6 +104,11 @@ def main(argv: list[str] | None = None) -> int:
             logging.error("rate limit pause %ss", pause)
         except (MexcError, LedgerError) as exc:
             logging.error("cycle failed closed: %s", exc)
+            if args.once:
+                return 1
+            pause = cfg.interval_sec
+        except OSError as exc:
+            logging.error("cycle paused, the link failed: %s", exc)
             if args.once:
                 return 1
             pause = cfg.interval_sec

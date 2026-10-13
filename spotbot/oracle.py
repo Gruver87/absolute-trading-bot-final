@@ -98,6 +98,7 @@ def venue_quotes(symbol: str, timeout_sec: int = 5) -> dict[str, int]:
     session = getattr(_LOCAL, "session", None)
     if session is None:
         session = requests.Session()
+        session.trust_env = False
         _LOCAL.session = session
     okx = _okx_inst(symbol)
     found: dict[str, int] = {}
@@ -127,7 +128,7 @@ def venue_quotes(symbol: str, timeout_sec: int = 5) -> dict[str, int]:
         )
     for label, url, params, pick in calls:
         try:
-            response = session.get(url, params=params, timeout=timeout_sec)
+            response = session.get(url, params=params, timeout=timeout_sec, allow_redirects=False)
         except requests.RequestException as exc:
             LOG.warning("oracle %s %s: %s", label, symbol, exc)
             continue

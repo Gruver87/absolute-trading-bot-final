@@ -46,7 +46,9 @@ def marked_equity(
 
 def drawdown_blocks(peak_micro: int, equity_micro: int, bps: int) -> bool:
     """True when the drop from the stored peak is at least bps of that peak."""
-    if bps <= 0 or peak_micro <= 0 or equity_micro < 0 or equity_micro >= peak_micro:
+    if equity_micro < 0:
+        return True
+    if bps <= 0 or peak_micro <= 0 or equity_micro >= peak_micro:
         return False
     return (peak_micro - equity_micro) * 10_000 >= peak_micro * bps
 
