@@ -22,6 +22,7 @@ from spotbot.money import (
     parse_micro,
     parse_micro_nonneg,
     parse_price,
+    decimal_zero,
     to_satoshi,
 )
 from dataclasses import dataclass
@@ -37,7 +38,44 @@ class MexcError(RuntimeError):
 
 
 class MexcRateLimit(MexcError):
-    """HTTP 429 or 418. The caller must stop, not retry in a loop."""
+    """HTTP or body 403, 418, or 429. The caller must stop, not retry in a loop.
+
+    retry_after_sec is the Retry-After header in seconds, when it is a plain integer.
+    """
+
+    def __init__(self, message: str, retry_after_sec: int | None = None) -> None:
+        super().__init__(message)
+        if retry_after_sec is not None and (retry_after_sec < 1 or isinstance(retry_after_sec, bool)):
+            retry_after_sec = None
+        self.retry_after_sec = retry_after_sec
+
+
+_MAX_BACKOFF_SEC = 259_200
+_MIN_UNKNOWN_BACKOFF_SEC = 120
+
+
+def backoff_sec(retry_after_sec: int | None, interval_sec: int) -> int:
+    """Seconds to stay silent after a limit. The cycle interval is the floor.
+
+    A missing or unreadable Retry-After waits at least two minutes. Three days
+    is the longest ban MEXC documents, so a larger header is cut there.
+    """
+    if isinstance(interval_sec, bool) or not isinstance(interval_sec, int) or interval_sec < 1:
+        raise MexcError("backoff interval must be an integer >= 1")
+    stated = retry_after_sec
+    if stated is None or isinstance(stated, bool) or not isinstance(stated, int) or stated < 1:
+        stated = _MIN_UNKNOWN_BACKOFF_SEC
+    if stated > _MAX_BACKOFF_SEC:
+        stated = _MAX_BACKOFF_SEC
+    return max(interval_sec, stated)
+
+
+def _retry_after_sec(value: str) -> int | None:
+    """Parse a delta-seconds Retry-After. An HTTP date is not guessed."""
+    text = value.strip()
+    if not text.isdigit():
+        return None
+    return int(text)
 
 
 @dataclass(frozen=True)
@@ -80,46 +118,18 @@ class MexcClient:
             "/api/v3/klines",
             {"symbol": symbol, "interval": interval, "limit": str(limit)},
         )
-        if not isinstance(payload, list) or len(payload) < 2:
-            raise MexcError(f"no klines for {symbol}")
-        rows: list[tuple[int, int, int, int, int]] = []
-        for row in payload:
-            if not isinstance(row, list) or len(row) < 8:
-                raise MexcError(f"bad kline row for {symbol}")
-            try:
-                rows.append(
-                    (
-                        parse_price(str(row[1])),
-                        parse_price(str(row[2])),
-                        parse_price(str(row[3])),
-                        parse_price(str(row[4])),
-                        parse_micro_nonneg(str(row[7])),
-                    )
-                )
-            except MoneyError as exc:
-                raise MexcError(f"bad kline number for {symbol}") from exc
-        return rows
+        span = _interval_ms(interval)
+        return parse_klines(symbol, payload, span)
 
     def depth_notional(self, symbol: str, limit: int = 20) -> tuple[int, int]:
         """Bid and ask notional in micro-USDT for the top of the book."""
         payload = self._public("/api/v3/depth", {"symbol": symbol, "limit": str(limit)})
-        if not isinstance(payload, dict):
-            raise MexcError(f"no depth for {symbol}")
-        return _side_notional(payload.get("bids")), _side_notional(payload.get("asks"))
+        return depth_notionals(payload, symbol)
 
     def book_top(self, symbol: str) -> tuple[int, int]:
         """Best bid and ask. One public request, not a socket. A crossed book is refused."""
         payload = self._public("/api/v3/ticker/bookTicker", {"symbol": symbol})
-        if not isinstance(payload, dict):
-            raise MexcError(f"no book ticker for {symbol}")
-        try:
-            bid = parse_price(str(payload.get("bidPrice")))
-            ask = parse_price(str(payload.get("askPrice")))
-        except MoneyError as exc:
-            raise MexcError(f"bad book ticker for {symbol}") from exc
-        if ask < bid:
-            raise MexcError(f"crossed book for {symbol}")
-        return bid, ask
+        return book_prices(payload, symbol)
 
     def book_spread_bps(self, symbol: str) -> int:
         """Top-of-book width in basis points. One public request, not a socket."""
@@ -158,22 +168,14 @@ class MexcClient:
 
     def price(self, symbol: str) -> int:
         payload = self._public("/api/v3/ticker/price", {"symbol": symbol})
-        if not isinstance(payload, dict) or "price" not in payload:
-            raise MexcError(f"no price for {symbol}")
-        try:
-            return parse_price(str(payload["price"]))
-        except MoneyError as exc:
-            raise MexcError(f"bad price for {symbol}") from exc
+        return ticker_price(payload, symbol)
 
     def server_time_ms(self) -> int:
         """Exchange clock in milliseconds. Public, no order."""
         payload = self._public("/api/v3/time", {})
         if not isinstance(payload, dict):
             raise MexcError("server time is not an object")
-        raw = payload.get("serverTime")
-        if isinstance(raw, bool) or not isinstance(raw, int) or raw <= 0:
-            raise MexcError("server time missing")
-        return raw
+        return positive_int(payload.get("serverTime"), "server time")
 
     def symbol_rule(self, symbol: str) -> SymbolRule:
         cached = self._rules.get(symbol)
@@ -185,6 +187,8 @@ class MexcClient:
         rows = payload.get("symbols")
         if not isinstance(rows, list) or not rows or not isinstance(rows[0], dict):
             raise MexcError(f"no exchangeInfo row for {symbol}")
+        if str(rows[0].get("symbol") or "") != symbol:
+            raise MexcError(f"exchangeInfo is not {symbol}")
         rule = parse_symbol_rule(rows[0])
         self._rules[symbol] = rule
         return rule
@@ -267,7 +271,7 @@ class MexcClient:
         params = {"symbol": symbol, "limit": str(limit)}
         if order_id:
             params["orderId"] = order_id
-        body = self._signed("GET", "/api/v3/myTrades", params)
+        body = self._signed("GET", "/api/v3/myTrades", params, as_list=True)
         if not isinstance(body, list):
             raise MexcError(f"trades for {symbol} are not a list")
         if len(body) >= limit:
@@ -291,9 +295,8 @@ class MexcClient:
             response = self._session().get(BASE + path, params=params, timeout=self._timeout)
         except requests.RequestException as exc:
             raise MexcError(str(exc)) from exc
-        if response.status_code in (418, 429):
-            wait = response.headers.get("Retry-After", "")
-            raise MexcRateLimit(f"{path} HTTP {response.status_code} retry-after={wait or 'unknown'}")
+        if response.status_code in (403, 418, 429):
+            _raise_limited(path, response.status_code, response.headers.get("Retry-After", ""))
         if response.status_code != 200:
             raise MexcError(f"{path} HTTP {response.status_code}")
         body = _json_body(response, path)
@@ -301,11 +304,11 @@ class MexcClient:
             _reject_exchange_code(body)
         return body
 
-    def _signed(self, method: str, path: str, params: dict[str, str]) -> dict[str, Any]:
+    def _signed(self, method: str, path: str, params: dict[str, str], as_list: bool = False) -> Any:
         if not self._key or not self._secret:
             raise MexcError("signed call without API key")
         query = dict(params)
-        query["timestamp"] = str(int(time.time() * 1000))
+        query["timestamp"] = str(time.time_ns() // 1_000_000)
         query["recvWindow"] = "5000"
         encoded = urlencode(query)
         signature = hmac.new(self._secret.encode(), encoded.encode(), hashlib.sha256).hexdigest()
@@ -315,16 +318,67 @@ class MexcClient:
             response = self._session().request(method, url, headers=headers, timeout=self._timeout)
         except requests.RequestException as exc:
             raise MexcError(str(exc)) from exc
-        if response.status_code in (418, 429):
-            wait = response.headers.get("Retry-After", "")
-            raise MexcRateLimit(f"order HTTP {response.status_code} retry-after={wait or 'unknown'}")
+        if response.status_code in (403, 418, 429):
+            _raise_limited("order", response.status_code, response.headers.get("Retry-After", ""))
         if response.status_code != 200:
             raise MexcError(f"order HTTP {response.status_code}: {response.text[:180]}")
-        body = _json_body(response, "order")
-        if not isinstance(body, dict):
-            raise MexcError("order response is not an object")
+        return signed_payload(_json_body(response, "order"), as_list)
+
+
+def signed_payload(body: object, as_list: bool) -> Any:
+    """An order ack is an object. The trade list is a list. An error object is neither."""
+    if isinstance(body, dict):
         _reject_exchange_code(body)
+        if as_list:
+            raise MexcError("order response is not a list")
         return body
+    if as_list and isinstance(body, list):
+        return body
+    raise MexcError("order response is not an object")
+
+
+def _interval_ms(interval: str) -> int:
+    spans = {
+        "1m": 60_000,
+        "5m": 300_000,
+        "15m": 900_000,
+        "30m": 1_800_000,
+        "1h": 3_600_000,
+        "4h": 14_400_000,
+        "1d": 86_400_000,
+    }
+    span = spans.get(interval)
+    if span is None:
+        raise MexcError(f"kline interval {interval or 'missing'} is not used")
+    return span
+
+
+def ticker_price(payload: object, symbol: str) -> int:
+    """Last price only when the row names the requested pair."""
+    if not isinstance(payload, dict) or "price" not in payload:
+        raise MexcError(f"no price for {symbol}")
+    if str(payload.get("symbol") or "") != symbol:
+        raise MexcError(f"price is not {symbol}")
+    try:
+        return parse_price(str(payload["price"]))
+    except MoneyError as exc:
+        raise MexcError(f"bad price for {symbol}") from exc
+
+
+def depth_notionals(payload: object, symbol: str) -> tuple[int, int]:
+    """Bid and ask notional. An empty side or a crossed top is not a book."""
+    if not isinstance(payload, dict):
+        raise MexcError(f"no depth for {symbol}")
+    named = payload.get("symbol")
+    if named not in (None, "") and str(named) != symbol:
+        raise MexcError(f"depth is not {symbol}")
+    bids = _depth_side(payload.get("bids"))
+    asks = _depth_side(payload.get("asks"))
+    if not bids or not asks:
+        raise MexcError(f"empty depth for {symbol}")
+    if min(price for price, _notional in asks) < max(price for price, _notional in bids):
+        raise MexcError(f"crossed depth for {symbol}")
+    return sum(notional for _price, notional in bids), sum(notional for _price, notional in asks)
 
 
 def _reject_exchange_code(body: dict[str, Any]) -> None:
@@ -335,7 +389,16 @@ def _reject_exchange_code(body: dict[str, Any]) -> None:
     if code in (0, 200, "0", "200"):
         return
     msg = str(body.get("msg") or body.get("message") or code)
-    raise MexcError(f"exchange code {code}: {msg[:180]}")
+    text = f"exchange code {code}: {msg[:180]}"
+    if code in (429, 418, 403, "429", "418", "403"):
+        raise MexcRateLimit(text)
+    raise MexcError(text)
+
+
+def _raise_limited(label: str, status: int, retry_after: str) -> None:
+    seconds = _retry_after_sec(retry_after)
+    shown = str(seconds) if seconds is not None else "unknown"
+    raise MexcRateLimit(f"{label} HTTP {status} retry-after={shown}", seconds)
 
 
 def _json_body(response: requests.Response, label: str) -> Any:
@@ -356,10 +419,11 @@ def DecimalChange(text: str) -> int:
     return int(bps)
 
 
-def _side_notional(levels: object) -> int:
+def _depth_side(levels: object) -> list[tuple[int, int]]:
+    """Positive levels as price and notional. A zero size is not a level."""
     if not isinstance(levels, list):
         raise MexcError("depth side is not a list")
-    total = 0
+    rows: list[tuple[int, int]] = []
     for level in levels:
         if not isinstance(level, list) or len(level) < 2:
             raise MexcError("depth level is incomplete")
@@ -368,9 +432,11 @@ def _side_notional(levels: object) -> int:
             qty_micro = parse_micro_nonneg(str(level[1]))
         except MoneyError as exc:
             raise MexcError("depth level is not decimal") from exc
+        if qty_micro <= 0:
+            continue
         atoms = qty_micro * (BASE_ATOMS // MICRO)
-        total += notional_micro(atoms, price)
-    return total
+        rows.append((price, notional_micro(atoms, price)))
+    return rows
 
 
 def _base_atoms(qty: str) -> int:
@@ -383,8 +449,119 @@ def _base_atoms(qty: str) -> int:
     return int(atoms)
 
 
+def positive_int(raw: object, label: str) -> int:
+    """A positive integer. A digit string is accepted. A bool or a fraction is not."""
+    if isinstance(raw, bool):
+        raise MexcError(f"{label} is not an integer")
+    if isinstance(raw, int):
+        value = raw
+    elif isinstance(raw, str) and raw.strip().isdigit():
+        value = int(raw.strip())
+    else:
+        raise MexcError(f"{label} is not an integer")
+    if value <= 0:
+        raise MexcError(f"{label} is not positive")
+    return value
+
+
+def book_prices(payload: object, symbol: str) -> tuple[int, int]:
+    """Best bid and ask. A zero or crossed book is refused."""
+    if not isinstance(payload, dict):
+        raise MexcError(f"no book ticker for {symbol}")
+    try:
+        bid = _book_side(payload.get("bidPrice"))
+        ask = _book_side(payload.get("askPrice"))
+    except MoneyError as exc:
+        raise MexcError(f"bad book ticker for {symbol}") from exc
+    if bid <= 0 or ask <= 0:
+        raise MexcError(f"empty book for {symbol}")
+    if not _size_ok(payload.get("bidQty")) or not _size_ok(payload.get("askQty")):
+        raise MexcError(f"empty book for {symbol}")
+    if ask < bid:
+        raise MexcError(f"crossed book for {symbol}")
+    if str(payload.get("symbol") or "") != symbol:
+        raise MexcError(f"book ticker is not {symbol}")
+    return bid, ask
+
+
+def _size_ok(raw: object) -> bool:
+    """True when the book shows a positive size. Zero is an empty level."""
+    from decimal import Decimal, InvalidOperation
+
+    text = str(raw).strip()
+    if text == "" or decimal_zero(text):
+        return False
+    try:
+        return Decimal(text) > 0
+    except InvalidOperation as exc:
+        raise MexcError("book size is not decimal") from exc
+
+
+def parse_klines(symbol: str, payload: object, span_ms: int | None = None) -> list[tuple[int, int, int, int, int]]:
+    """Open, high, low, close, and quote volume. A broken candle is refused."""
+    if not isinstance(payload, list) or len(payload) < 2:
+        raise MexcError(f"no klines for {symbol}")
+    rows: list[tuple[int, int, int, int, int]] = []
+    previous_open = 0
+    previous_close = 0
+    previous_span = 0
+    for row in payload:
+        if not isinstance(row, list) or len(row) < 8:
+            raise MexcError(f"bad kline row for {symbol}")
+        opened = positive_int(row[0], f"bad kline time for {symbol}")
+        closed_at = positive_int(row[6], f"bad kline time for {symbol}")
+        if opened <= previous_open or closed_at <= opened or (previous_close > 0 and opened < previous_close):
+            raise MexcError(f"kline time for {symbol} is out of order")
+        span = closed_at - opened + 1
+        if (span_ms is not None and span != span_ms) or (previous_span and span != previous_span):
+            raise MexcError(f"kline interval for {symbol} is not the one requested")
+        previous_open = opened
+        previous_close = closed_at
+        previous_span = span
+        try:
+            open_px = parse_price(str(row[1]))
+            high = parse_price(str(row[2]))
+            low = parse_price(str(row[3]))
+            close = parse_price(str(row[4]))
+            quote = parse_micro_nonneg(str(row[7]))
+        except MoneyError as exc:
+            raise MexcError(f"bad kline number for {symbol}") from exc
+        if quote <= 0:
+            raise MexcError(f"kline volume for {symbol} is zero")
+        if min(open_px, high, low, close) <= 0 or low > high or open_px < low or open_px > high or close < low or close > high:
+            raise MexcError(f"kline range for {symbol} is impossible")
+        rows.append((open_px, high, low, close, quote))
+    return rows
+
+
+def _decimal_zero(text: str) -> bool:
+    """True when the text is a decimal zero. A non-decimal is left for the parser."""
+    from decimal import Decimal, InvalidOperation
+
+    try:
+        return Decimal(text) == 0
+    except InvalidOperation:
+        return False
+
+
+def _book_side(raw: object) -> int:
+    text = str(raw).strip()
+    if text == "" or _decimal_zero(text):
+        return 0
+    return parse_price(text)
+
+
+_ID_LOCK = threading.Lock()
+_ID_SEQ = 0
+
+
 def new_client_order_id(symbol: str, side: str) -> str:
-    digest = hashlib.sha256(f"{side}:{symbol}:{time.time_ns()}".encode()).hexdigest()
+    """A 32-character id. A counter keeps two calls in the same nanosecond apart."""
+    global _ID_SEQ
+    with _ID_LOCK:
+        _ID_SEQ += 1
+        seq = _ID_SEQ
+    digest = hashlib.sha256(f"{side}:{symbol}:{time.time_ns()}:{seq}".encode()).hexdigest()
     return digest[:32]
 
 
@@ -396,9 +573,10 @@ def executed_fill(body: dict[str, Any]) -> tuple[int, int, int] | None:
     an empty fill.
     """
     executed = str(body.get("executedQty") or "")
-    raw = body.get("cummulativeQuoteQty") or body.get("cumulativeQuoteQty")
-    if executed.strip() in ("", "0", "0.0", "0.00", "0.00000000"):
+    text = executed.strip()
+    if text == "" or _decimal_zero(text):
         return None
+    raw = body.get("cummulativeQuoteQty") or body.get("cumulativeQuoteQty")
     base = _base_atoms(executed)
     if raw in (None, ""):
         raise MexcError("executed order is missing quote qty")
@@ -458,7 +636,7 @@ def ack_commission(body: dict[str, Any], base_asset: str) -> tuple[int, int]:
     if commission in (None, ""):
         return 0, 0
     raw = str(commission).strip()
-    if raw in ("", "0", "0.0", "0.00"):
+    if raw in ("", "0", "0.0", "0.00") or decimal_zero(raw):
         return 0, 0
     asset = str(body.get("commissionAsset") or "").upper()
     if not base_asset:
@@ -503,9 +681,11 @@ def parse_account(payload: dict[str, Any]) -> tuple[int, int, dict[str, int], di
     for row in rows:
         if not isinstance(row, dict):
             raise MexcError("balance row is not an object")
-        asset = str(row.get("asset") or "")
+        asset = str(row.get("asset") or "").strip().upper()
         free = _qty_micro(row.get("free"))
         locked = _qty_micro(row.get("locked"))
+        if free < 0 or locked < 0:
+            raise MexcError("balance is negative")
         if not asset:
             if free or locked:
                 raise MexcError("balance row has no asset")

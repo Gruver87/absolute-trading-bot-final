@@ -17,6 +17,7 @@ from spotbot.money import (
     base_for_quote,
     notional_micro,
     parse_micro,
+    parse_micro_nonneg,
     to_satoshi,
 )
 
@@ -43,11 +44,17 @@ def parse_symbol_rule(row: dict[str, object]) -> SymbolRule:
     if not symbol:
         raise RuleError("exchangeInfo row has no symbol")
     taker_bps = _taker_bps(row.get("takerCommission"))
-    step = _step_atoms(str(row.get("baseSizePrecision") or "0"))
+    step, step_reason = _step_atoms(str(row.get("baseSizePrecision") or "0"))
     quote_step, quote_reason = _quote_step(row.get("quoteAmountPrecisionMarket") or row.get("quoteAmountPrecision"))
     max_quote = _max_quote(row.get("maxQuoteAmountMarket"))
     tick, tick_reason = _price_tick(row.get("quotePrecision"))
-    reason = _refuse_reason(row) or quote_reason or tick_reason or _max_quote_reason(row.get("maxQuoteAmountMarket"))
+    reason = (
+        _refuse_reason(row)
+        or step_reason
+        or quote_reason
+        or tick_reason
+        or _max_quote_reason(row.get("maxQuoteAmountMarket"))
+    )
     return SymbolRule(
         symbol, reason == "", reason, taker_bps, step, quote_step, max_quote, str(row.get("baseAsset") or ""), tick
     )
@@ -153,24 +160,24 @@ def _taker_bps(raw: object) -> int:
         micro = to_satoshi(str(raw))
     except MoneyError as exc:
         raise RuleError("takerCommission is not decimal") from exc
-    bps = micro * 10_000 // MICRO
+    bps = (micro * 10_000 + MICRO - 1) // MICRO
     if bps < 0 or bps > 100:
         raise RuleError(f"takerCommission out of range: {raw}")
     return bps
 
 
-def _step_atoms(text: str) -> int:
+def _step_atoms(text: str) -> tuple[int, str]:
     raw = text.strip()
-    if raw in ("0", "0.0"):
-        return BASE_ATOMS
+    if raw in ("", "0", "0.0", "0.00"):
+        return 0, "base step is missing"
     try:
         micro = to_satoshi(raw)
-    except MoneyError as exc:
-        raise RuleError("baseSizePrecision is not decimal") from exc
+    except MoneyError:
+        return 0, "base step is not decimal"
     atoms = micro * (BASE_ATOMS // MICRO)
     if atoms <= 0:
-        raise RuleError("base step is zero")
-    return atoms
+        return 0, "base step is missing"
+    return atoms, ""
 
 
 def _price_tick(raw: object) -> tuple[int, str]:
@@ -194,9 +201,12 @@ def _quote_step(raw: object) -> tuple[int, str]:
     if raw is None or str(raw).strip() == "":
         return 0, "market min quote missing"
     try:
-        return parse_micro(str(raw)), ""
+        step = parse_micro_nonneg(str(raw))
     except MoneyError:
         return 0, "market min quote is not decimal"
+    if step <= 0:
+        return 0, "market min quote is not positive"
+    return step, ""
 
 
 def _max_quote(raw: object) -> int:
@@ -209,11 +219,13 @@ def _max_quote(raw: object) -> int:
 
 
 def _max_quote_reason(raw: object) -> str:
-    """A present but unreadable cap refuses the pair. An empty cap is unlimited."""
+    """A present but unreadable or non-positive cap refuses the pair. An empty cap is unlimited."""
     if raw is None or str(raw).strip() == "":
         return ""
     try:
-        parse_micro(str(raw))
+        cap = parse_micro_nonneg(str(raw))
     except MoneyError:
         return "max quote is not decimal"
+    if cap <= 0:
+        return "max quote is not positive"
     return ""

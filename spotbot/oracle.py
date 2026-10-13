@@ -28,13 +28,24 @@ class OracleError(RuntimeError):
     """A venue returned nothing usable."""
 
 
+def _lower_middle(ordered: list[int]) -> int:
+    """Odd count: the middle. Even count: the lower of the two middle values."""
+    mid = len(ordered) // 2
+    if len(ordered) % 2 == 1:
+        return ordered[mid]
+    return ordered[mid - 1]
+
+
 def deviation_bps(prices: list[int]) -> int | None:
-    """Width of the price set in basis points of the median. None if fewer than two."""
+    """Width of the price set in basis points of the median. None if fewer than two.
+
+    An even count uses the lower middle price, so the width is not understated.
+    """
     vals = [price for price in prices if price > 0]
     if len(vals) < 2:
         return None
     ordered = sorted(vals)
-    mid = ordered[len(ordered) // 2]
+    mid = _lower_middle(ordered)
     if mid <= 0:
         return None
     return (ordered[-1] - ordered[0]) * 10_000 // mid
@@ -49,7 +60,7 @@ def lag_bps(mexc_micro: int, peers: list[int]) -> int | None:
     if mexc_micro <= 0 or not vals:
         return None
     ordered = sorted(vals)
-    mid = ordered[len(ordered) // 2]
+    mid = _lower_middle(ordered)
     if mid <= 0:
         return None
     return (mexc_micro - mid) * 10_000 // mid
@@ -95,13 +106,13 @@ def venue_quotes(symbol: str, timeout_sec: int = 5) -> dict[str, int]:
             "binance",
             "https://api.binance.com/api/v3/ticker/price",
             {"symbol": symbol},
-            lambda body: body.get("price") if isinstance(body, dict) else None,
+            lambda body: _binance_price(body, symbol),
         ),
         (
             "bybit",
             "https://api.bybit.com/v5/market/tickers",
             {"category": "spot", "symbol": symbol},
-            _bybit_price,
+            lambda body: _bybit_price(body, symbol),
         ),
     )
     if okx is not None:
@@ -111,7 +122,7 @@ def venue_quotes(symbol: str, timeout_sec: int = 5) -> dict[str, int]:
                 "okx",
                 "https://www.okx.com/api/v5/market/ticker",
                 {"instId": okx},
-                _okx_price,
+                lambda body: _okx_price(body, okx),
             ),
         )
     for label, url, params, pick in calls:
@@ -139,7 +150,14 @@ def _okx_inst(symbol: str) -> str | None:
     return f"{symbol[:-4]}-USDT"
 
 
-def _bybit_price(body: object) -> str | None:
+def _binance_price(body: object, symbol: str) -> str | None:
+    if not isinstance(body, dict) or str(body.get("symbol") or "") != symbol:
+        return None
+    last = body.get("price")
+    return str(last) if last else None
+
+
+def _bybit_price(body: object, symbol: str) -> str | None:
     if not isinstance(body, dict):
         return None
     result = body.get("result")
@@ -148,15 +166,19 @@ def _bybit_price(body: object) -> str | None:
     rows = result.get("list")
     if not isinstance(rows, list) or not rows or not isinstance(rows[0], dict):
         return None
+    if str(rows[0].get("symbol") or "") != symbol:
+        return None
     last = rows[0].get("lastPrice")
     return str(last) if last else None
 
 
-def _okx_price(body: object) -> str | None:
+def _okx_price(body: object, inst_id: str) -> str | None:
     if not isinstance(body, dict):
         return None
     rows = body.get("data")
     if not isinstance(rows, list) or not rows or not isinstance(rows[0], dict):
+        return None
+    if str(rows[0].get("instId") or "") != inst_id:
         return None
     last = rows[0].get("last")
     return str(last) if last else None

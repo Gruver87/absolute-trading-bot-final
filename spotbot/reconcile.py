@@ -51,8 +51,14 @@ def order_finished(body: dict[str, object]) -> bool:
 
 
 def order_missing(message: str) -> bool:
+    """True only for an unknown order. A missing symbol or balance is not that."""
     text = message.lower()
-    return "not exist" in text or "-2013" in text or "unknown order" in text
+    return (
+        "order does not exist" in text
+        or "unknown order" in text
+        or "-2011" in text
+        or "-2013" in text
+    )
 
 
 def pending_gone(misses: int, applied_atoms: int, has_fill: bool, acked: bool = False) -> bool:
@@ -112,7 +118,17 @@ def split_commission(
         raise FeeAssetError("commission needs an order, a base asset, and a side")
     if not order_id.isdigit() or len(order_id) > 32:
         raise FeeAssetError("trade order id is not digits")
-    from spotbot.money import BASE_ATOMS, MICRO, MoneyError, notional_micro, parse_micro, parse_micro_nonneg, parse_price, to_satoshi
+    from spotbot.money import (
+        BASE_ATOMS,
+        MICRO,
+        MoneyError,
+        decimal_zero,
+        notional_micro,
+        parse_micro,
+        parse_micro_nonneg,
+        parse_price,
+        to_satoshi,
+    )
 
     want_buyer = side == "BUY"
     usdt = 0
@@ -163,7 +179,7 @@ def split_commission(
         traded_quote += row_quote
         asset = str(row.get("commissionAsset") or "").upper()
         raw = str(row.get("commission") or "0")
-        if raw.strip() in ("", "0", "0.0", "0.00"):
+        if raw.strip() in ("", "0", "0.0", "0.00") or decimal_zero(raw):
             continue
         if asset == "USDT":
             try:

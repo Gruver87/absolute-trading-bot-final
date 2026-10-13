@@ -96,6 +96,19 @@ def parse_price(text: str) -> int:
     return int(scaled)
 
 
+def decimal_zero(text: str) -> bool:
+    """True when the text is a decimal zero. A non-decimal is not zero."""
+    if not isinstance(text, str):
+        return False
+    raw = text.strip()
+    if not raw:
+        return False
+    try:
+        return Decimal(raw) == 0
+    except InvalidOperation:
+        return False
+
+
 def format_price(price: int) -> str:
     """Render a coin price. This is not a cash balance."""
     if isinstance(price, bool) or not isinstance(price, int) or price < 0:

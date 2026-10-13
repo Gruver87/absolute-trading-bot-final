@@ -14,7 +14,7 @@ from pathlib import Path
 
 from spotbot.config import Config
 from spotbot.engine import run_cycle
-from spotbot.mexc import MexcClient, MexcError
+from spotbot.mexc import MexcClient, MexcError, MexcRateLimit
 from spotbot.money import format_usdt
 from spotbot.state import load_book, save_book, write_atomic
 
@@ -130,5 +130,8 @@ def run_sleeves(cfg: Config, client: MexcClient, data_dir: Path) -> None:
         LOG.info("sleeve=%s symbols=%s", sleeve.name, ",".join(sleeve.symbols))
         try:
             run_cycle(child, client, path, book_name=sleeve.name, sibling_paths=siblings)
+        except MexcRateLimit:
+            LOG.error("sleeve %s stopped on rate limit; the other sleeves wait", sleeve.name)
+            raise
         except MexcError as exc:
             LOG.error("sleeve %s failed closed: %s", sleeve.name, exc)

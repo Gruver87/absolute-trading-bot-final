@@ -37,8 +37,11 @@ def snapshot(data_dir: Path, port: int = DEFAULT_PORT) -> dict[str, object]:
             path = base / f"{name}.json"
             if not path.exists():
                 continue
-            loaded = json.loads(path.read_text(encoding="utf-8"))
             key = name if folder == "" else f"{folder}/{name}"
+            loaded = _read_json(path)
+            if not isinstance(loaded, dict):
+                books[key] = {"error": "book is not json"}
+                continue
             books[key] = _show_book(loaded)
     return {
         "bind": f"127.0.0.1:{port}",
@@ -107,6 +110,7 @@ def _show_book(loaded: object) -> object:
         for key in ("entry_micro", "peak_micro"):
             raw = pos.get(key)
             if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+                pos[key] = "unreadable"
                 continue
             pos[key] = format_price(raw * 1_000_000 if legacy else raw)
     return view
@@ -125,17 +129,30 @@ def _hidden(key: str) -> bool:
     return any(part in low for part in _HIDDEN)
 
 
+def _read_json(path: Path) -> object | None:
+    """None when the file cannot be read. One bad file must not blank the page."""
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+
+
 def _heartbeat(data_dir: Path) -> dict[str, object] | None:
     path = data_dir / "ops_heartbeat.json"
     if not path.exists():
         return None
-    loaded = json.loads(path.read_text(encoding="utf-8"))
+    loaded = _read_json(path)
     if not isinstance(loaded, dict) or not loaded.get("at"):
         return None
     from datetime import datetime
 
-    then = datetime.fromisoformat(str(loaded["at"]))
-    age = int((datetime.now().astimezone() - then).total_seconds())
+    try:
+        then = datetime.fromisoformat(str(loaded["at"]))
+        if then.tzinfo is None:
+            return None
+        age = int((datetime.now().astimezone() - then).total_seconds())
+    except (TypeError, ValueError, OverflowError):
+        return None
     return {"at": loaded["at"], "book": loaded.get("book") or "", "age_sec": max(age, 0)}
 
 
@@ -143,7 +160,7 @@ def _quotes(data_dir: Path) -> dict[str, object]:
     path = data_dir / "ops_quotes.json"
     if not path.exists():
         return {}
-    loaded = json.loads(path.read_text(encoding="utf-8"))
+    loaded = _read_json(path)
     return loaded if isinstance(loaded, dict) else {}
 
 
@@ -155,7 +172,10 @@ def _events(data_dir: Path) -> list[object]:
     for line in path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
-        item = json.loads(line)
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
         if isinstance(item, dict):
             rows.append(_public(item))
     return rows[-50:]

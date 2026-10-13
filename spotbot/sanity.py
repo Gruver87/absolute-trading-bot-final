@@ -43,6 +43,14 @@ def slip_price(price: int, bps: int, buy: bool) -> int:
     return sold if sold > 0 else 0
 
 
+def follows_close(close: int, ask: int) -> bool:
+    """The live ask must stay inside the same jump limit as two closes."""
+    try:
+        return price_ok(close, ask)
+    except ValueError:
+        return False
+
+
 def mark_ok(peak: int, price: int) -> bool:
     """An exit mark may gap through a stop. It may not be non-positive or many times the peak."""
     if peak <= 0 or price <= 0:
