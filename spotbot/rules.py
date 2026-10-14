@@ -40,9 +40,26 @@ class SymbolRule:
     price_tick: int = 1
 
 
+def _nested_wide(value: object, depth: int = 0) -> bool:
+    """A filter inside the pair row is a small object. A nested bomb is not a rule."""
+    if depth > 6:
+        return True
+    if isinstance(value, dict):
+        return len(value) > 32 or any(_nested_wide(item, depth + 1) for item in value.values())
+    if isinstance(value, list):
+        return len(value) > 64 or any(_nested_wide(item, depth + 1) for item in value)
+    return False
+
+
 def parse_symbol_rule(row: dict[str, object]) -> SymbolRule:
     if not isinstance(row, dict):
         raise RuleError("exchangeInfo row is not an object")
+    if len(row) > 128:
+        raise RuleError("exchangeInfo row is too wide")
+    if any(isinstance(value, list) and len(value) > 64 for value in row.values()):
+        raise RuleError("exchangeInfo list is too long")
+    if any(_nested_wide(value) for value in row.values()):
+        raise RuleError("exchangeInfo value is too wide")
     symbol = row.get("symbol")
     if not isinstance(symbol, str) or not symbol:
         raise RuleError("exchangeInfo row has no symbol")
@@ -210,7 +227,7 @@ def _taker_bps(raw: object) -> int:
         raise RuleError("takerCommission is not decimal") from exc
     bps = (micro * 10_000 + MICRO - 1) // MICRO
     if bps < 0 or bps > 100:
-        raise RuleError(f"takerCommission out of range: {raw}")
+        raise RuleError("takerCommission out of range")
     return bps
 
 

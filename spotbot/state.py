@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
@@ -47,6 +48,8 @@ class Position:
     def from_json(cls, raw: dict[str, object]) -> "Position":
         if not isinstance(raw, dict):
             raise LedgerError("position is not an object")
+        if len(raw) > 16:
+            raise LedgerError("position has too many fields")
         for key in ("symbol", "entry_micro", "peak_micro", "quote_micro", "base_atoms", "reason"):
             if key not in raw:
                 raise LedgerError("position is missing a field")
@@ -144,7 +147,20 @@ def _flag(value: object, label: str) -> bool:
 def _as_int(value: object, label: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise LedgerError(f"{label} is not an integer")
+    if value <= -_MAX_BOOK or value >= _MAX_BOOK:
+        raise LedgerError(f"{label} is too large")
     return value
+
+
+def structure_too_deep(value: object, depth: int = 0) -> bool:
+    """A book or a treasury is a shallow object. A nested bomb is not opened."""
+    if depth > 8:
+        return True
+    if isinstance(value, dict):
+        return any(structure_too_deep(item, depth + 1) for item in value.values())
+    if isinstance(value, list):
+        return any(structure_too_deep(item, depth + 1) for item in value)
+    return False
 
 
 def _text(value: object, label: str) -> str:
@@ -153,6 +169,8 @@ def _text(value: object, label: str) -> str:
         return ""
     if not isinstance(value, str):
         raise LedgerError(f"{label} is not text")
+    if len(value) > 80:
+        raise LedgerError(f"{label} is too long")
     return value
 
 
@@ -165,7 +183,7 @@ def _pair_stops(raw: object) -> dict[str, list[int]]:
         raise LedgerError("pair stops are too many")
     out: dict[str, list[int]] = {}
     for key, value in raw.items():
-        if not isinstance(key, str):
+        if not isinstance(key, str) or len(key) > 32:
             raise LedgerError("pair stop symbol is not text")
         if not isinstance(value, list) or len(value) > 8:
             raise LedgerError("pair stop times are not a list" if not isinstance(value, list) else "pair stop list is too long")
@@ -182,7 +200,7 @@ def _pair_locks(raw: object) -> dict[str, int]:
         raise LedgerError("pair locks are too many")
     out: dict[str, int] = {}
     for key, value in raw.items():
-        if not isinstance(key, str):
+        if not isinstance(key, str) or len(key) > 32:
             raise LedgerError("pair lock symbol is not text")
         out[key] = _as_int(value, "pair lock")
     return out
@@ -202,10 +220,14 @@ def load_book(path: Path, paper_cash_micro: int) -> Book:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except LedgerError:
         raise
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeError, json.JSONDecodeError, RecursionError) as exc:
         raise LedgerError("book is not json") from exc
+    if structure_too_deep(raw):
+        raise LedgerError("book is too deep")
     if not isinstance(raw, dict):
         raise LedgerError("book is not an object")
+    if len(raw) > 64:
+        raise LedgerError("book has too many fields")
     if "cash_micro" not in raw:
         raise LedgerError("book is missing a field")
     rows = raw.get("positions", [])
@@ -216,8 +238,11 @@ def load_book(path: Path, paper_cash_micro: int) -> Book:
     positions = [Position.from_json(item) for item in rows]
     if "price_scale" not in raw:
         for pos in positions:
-            pos.entry_micro *= 1_000_000
-            pos.peak_micro *= 1_000_000
+            for name in ("entry_micro", "peak_micro"):
+                scaled = getattr(pos, name) * 1_000_000
+                if scaled >= _MAX_BOOK:
+                    raise LedgerError("legacy price is too large")
+                setattr(pos, name, scaled)
     elif _as_int(raw.get("price_scale"), "price_scale") != 1_000_000_000_000:
         raise LedgerError("price scale is not the coin price scale")
     book = Book(
@@ -288,8 +313,8 @@ def _audit_pair_map(stops: dict[str, list[int]], locks: dict[str, int]) -> None:
 
 
 def _audit_pair_symbol(symbol: str) -> None:
-    if not usdt_symbol_ok(symbol):
-        raise LedgerError(f"{symbol or 'missing'} is not a USDT pair")
+    if not isinstance(symbol, str) or len(symbol) > 32 or not usdt_symbol_ok(symbol):
+        raise LedgerError("pair name is not a USDT pair")
 
 
 def usdt_symbol_ok(symbol: str) -> bool:
@@ -479,6 +504,14 @@ def bind_ledger(book: Book, live: bool) -> None:
     book.ledger = expected
 
 
+def _lock_held_by_other(exc: OSError) -> bool:
+    """A busy lock is another process. A full disk is not that."""
+    win = getattr(exc, "winerror", None)
+    if win in (32, 33):
+        return True
+    return exc.errno in (errno.EAGAIN, errno.EACCES, errno.EWOULDBLOCK)
+
+
 def _lock_file(handle: IO[bytes]) -> None:
     """One non-blocking byte lock. The operating system drops it when the process dies."""
     file = handle
@@ -520,7 +553,9 @@ def hold_ledger(directory: Path) -> Iterator[None]:
         _lock_file(handle)
     except OSError as exc:
         handle.close()
-        raise LedgerError("another process holds this ledger") from exc
+        if _lock_held_by_other(exc):
+            raise LedgerError("another process holds this ledger") from exc
+        raise LedgerError("ledger lock could not be written") from exc
     try:
         yield
     finally:
@@ -532,6 +567,8 @@ def hold_ledger(directory: Path) -> Iterator[None]:
 
 def write_atomic(path: Path, text: str) -> None:
     """Replace the file only after the new bytes are flushed. A crash keeps the previous file."""
+    if not isinstance(text, str) or len(text) > 1_000_000:
+        raise LedgerError("file is too large")
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     with tmp.open("w", encoding="utf-8", newline="\n") as handle:

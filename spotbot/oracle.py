@@ -57,7 +57,7 @@ def deviation_bps(prices: list[int]) -> int | None:
 
     An even count uses the lower middle price, so the width is not understated.
     """
-    if len(prices) > 8:
+    if not isinstance(prices, list) or len(prices) > 8:
         return None
     vals = [price for price in prices if _price_ok(price)]
     if len(vals) < 2:
@@ -66,7 +66,10 @@ def deviation_bps(prices: list[int]) -> int | None:
     mid = _lower_middle(ordered)
     if mid <= 0:
         return None
-    return (ordered[-1] - ordered[0]) * 10_000 // mid
+    width = (ordered[-1] - ordered[0]) * 10_000 // mid
+    if width >= 1_000_000_000:
+        return None
+    return width
 
 
 def lag_bps(mexc_micro: int, peers: list[int]) -> int | None:
@@ -74,7 +77,7 @@ def lag_bps(mexc_micro: int, peers: list[int]) -> int | None:
 
     Positive means MEXC is richer. None when there is no other price.
     """
-    if len(peers) > 8:
+    if not isinstance(peers, list) or len(peers) > 8:
         return None
     vals = [price for price in peers if _price_ok(price)]
     if not _price_ok(mexc_micro) or not vals:
@@ -83,17 +86,24 @@ def lag_bps(mexc_micro: int, peers: list[int]) -> int | None:
     mid = _lower_middle(ordered)
     if mid <= 0:
         return None
-    return (mexc_micro - mid) * 10_000 // mid
+    lag = (mexc_micro - mid) * 10_000 // mid
+    if lag <= -1_000_000_000 or lag >= 1_000_000_000:
+        return None
+    return lag
 
 
 def cheapest_first(rows: list[tuple[str, int]]) -> list[str]:
     """Order symbols by lag. A lower lag means MEXC is cheaper. Ties follow the name."""
-    if len(rows) > 32:
+    if not isinstance(rows, list) or len(rows) > 32:
         return []
     clean = [
         (symbol, lag)
         for symbol, lag in rows
-        if isinstance(symbol, str) and not isinstance(lag, bool) and isinstance(lag, int)
+        if isinstance(symbol, str)
+        and len(symbol) <= 32
+        and not isinstance(lag, bool)
+        and isinstance(lag, int)
+        and -1_000_000_000 < lag < 1_000_000_000
     ]
     return [symbol for symbol, _lag in sorted(clean, key=lambda row: (row[1], row[0]))]
 
@@ -180,7 +190,7 @@ def venue_quotes(symbol: str, timeout_sec: int = 5) -> dict[str, int]:
                 continue
             found[label] = parse_price(raw if isinstance(raw, str) else decimal_text(raw))
         except (MoneyError, ValueError, TypeError) as exc:
-            LOG.warning("oracle %s %s parse: %s", label, symbol, exc)
+            LOG.warning("oracle %s %s parse: %s", label, symbol, str(exc)[:180])
     return found
 
 
@@ -194,19 +204,19 @@ def _okx_inst(symbol: str) -> str | None:
 
 def _binance_price(body: object, symbol: str) -> str | None:
     named = body.get("symbol") if isinstance(body, dict) else None
-    if not isinstance(body, dict) or not isinstance(named, str) or named != symbol:
+    if not isinstance(body, dict) or len(body) > 16 or not isinstance(named, str) or named != symbol:
         return None
     return _price_text(body.get("price"))
 
 
 def _bybit_price(body: object, symbol: str) -> str | None:
-    if not isinstance(body, dict):
+    if not isinstance(body, dict) or len(body) > 16:
         return None
     result = body.get("result")
-    if not isinstance(result, dict):
+    if not isinstance(result, dict) or len(result) > 16:
         return None
     rows = result.get("list")
-    if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
+    if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict) or len(rows[0]) > 64:
         return None
     named = rows[0].get("symbol")
     if not isinstance(named, str) or named != symbol:
@@ -215,10 +225,10 @@ def _bybit_price(body: object, symbol: str) -> str | None:
 
 
 def _okx_price(body: object, inst_id: str) -> str | None:
-    if not isinstance(body, dict):
+    if not isinstance(body, dict) or len(body) > 16:
         return None
     rows = body.get("data")
-    if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
+    if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict) or len(rows[0]) > 64:
         return None
     named = rows[0].get("instId")
     if not isinstance(named, str) or named != inst_id:

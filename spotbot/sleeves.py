@@ -16,7 +16,7 @@ from spotbot.config import Config
 from spotbot.engine import run_cycle
 from spotbot.mexc import MexcClient, MexcError, MexcRateLimit
 from spotbot.money import format_usdt
-from spotbot.state import load_book, save_book, usdt_symbol_ok, write_atomic
+from spotbot.state import load_book, save_book, structure_too_deep, usdt_symbol_ok, write_atomic
 
 LOG = logging.getLogger("spotbot")
 
@@ -58,10 +58,14 @@ def _treasury(path: Path) -> dict[str, object]:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except SleeveError:
         raise
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeError, json.JSONDecodeError, RecursionError) as exc:
         raise SleeveError("treasury is not json") from exc
+    if structure_too_deep(raw):
+        raise SleeveError("treasury is too deep")
     if not isinstance(raw, dict) or "funded_micro" not in raw:
         raise SleeveError("treasury has no funded amount")
+    if len(raw) > 8:
+        raise SleeveError("treasury has too many fields")
     funded = raw["funded_micro"]
     if isinstance(funded, bool) or not isinstance(funded, int) or funded < 0 or funded >= 10**24:
         raise SleeveError("treasury amount is not a non-negative integer")
@@ -85,8 +89,8 @@ def _open_split(raw: dict[str, object], funded: int) -> tuple[int, tuple[int, in
     pending = raw.get("pending")
     if pending is None:
         return None
-    if not isinstance(pending, dict):
-        raise SleeveError("open funding split is not an object")
+    if not isinstance(pending, dict) or len(pending) > 4:
+        raise SleeveError("open funding split is not an object" if not isinstance(pending, dict) else "open funding split is too wide")
     target = pending.get("target_micro")
     parts = pending.get("parts")
     if isinstance(target, bool) or not isinstance(target, int) or target < funded or target >= 10**24:

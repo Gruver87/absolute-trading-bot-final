@@ -231,11 +231,15 @@ def split_commission(
     for row in trades:
         if not isinstance(row, dict):
             continue
+        if len(row) > 32:
+            raise FeeAssetError("trade row is too wide")
         order_raw = row.get("orderId")
         if order_raw in (None, ""):
             continue
         if not isinstance(order_raw, str):
             raise FeeAssetError("trade order id is not digits")
+        if len(order_raw) > 32:
+            continue
         if order_raw != order_id:
             continue
         seen = True
@@ -246,7 +250,7 @@ def split_commission(
         if not isinstance(trade_raw, str):
             raise FeeAssetError("trade id is not digits")
         trade_id = trade_raw
-        if not trade_id.isdigit() or len(trade_id) > 32:
+        if len(trade_id) > 32 or not trade_id.isdigit():
             raise FeeAssetError("trade id is not digits")
         if trade_id in seen_ids:
             raise FeeAssetError("trade id is repeated")
@@ -286,7 +290,11 @@ def split_commission(
         asset_raw = row.get("commissionAsset")
         if not isinstance(asset_raw, str) or not asset_raw:
             raise FeeAssetError("commission asset is missing")
-        asset = asset_raw.upper()
+        if len(asset_raw) > 32:
+            raise FeeAssetError("commission asset is not text")
+        asset = asset_raw.strip().upper()
+        if not asset or any(ch not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" for ch in asset):
+            raise FeeAssetError("commission asset is not text")
         try:
             raw = decimal_text(commission)
         except MoneyError as exc:
@@ -311,7 +319,7 @@ def split_commission(
                 raise FeeAssetError(f"{base_asset} commission rounds to zero")
             base += atoms
             continue
-        raise FeeAssetError(f"commission asset {asset or 'missing'}")
+        raise FeeAssetError("commission asset is not the traded coin")
     if not seen:
         raise FeeAssetError("order has no trade row")
     if traded_base <= 0 or traded_quote <= 0:
@@ -323,8 +331,8 @@ def split_commission(
 
 def usdt_commission(trades: list[object], order_id: str) -> int:
     """Sum USDT commission rows for one exchange order. Other assets are ignored."""
-    if not isinstance(order_id, str) or not order_id or len(order_id) > 32:
-        return 0
+    if not isinstance(order_id, str) or len(order_id) > 32 or not order_id.isdigit():
+        raise FeeAssetError("trade order id is not digits")
     if len(trades) > 5_000:
         raise FeeAssetError("trade list is too large")
     from spotbot.money import MoneyError, decimal_text, parse_micro_nonneg
@@ -333,11 +341,15 @@ def usdt_commission(trades: list[object], order_id: str) -> int:
     for row in trades:
         if not isinstance(row, dict):
             continue
+        if len(row) > 32:
+            raise FeeAssetError("trade row is too wide")
         order_raw = row.get("orderId")
-        if not isinstance(order_raw, str) or order_raw != order_id:
+        if not isinstance(order_raw, str) or len(order_raw) > 32 or order_raw != order_id:
             continue
         asset_raw = row.get("commissionAsset")
-        if not isinstance(asset_raw, str) or asset_raw.upper() != "USDT":
+        if not isinstance(asset_raw, str) or len(asset_raw) > 32:
+            raise FeeAssetError("commission asset is not text")
+        if asset_raw.strip().upper() != "USDT":
             continue
         commission = row.get("commission")
         if commission in (None, ""):

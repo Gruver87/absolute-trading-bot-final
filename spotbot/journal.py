@@ -8,6 +8,8 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
+from spotbot.state import LedgerError, structure_too_deep
+
 LOG = logging.getLogger("spotbot.journal")
 _LOCK = threading.Lock()
 _MAX_EVENTS = 200
@@ -22,6 +24,8 @@ def ops_root(book_path: Path) -> Path:
 
 def note_event(data_dir: Path, **fields: object) -> None:
     """Append one trade or skip. A journal failure does not abort the cycle."""
+    if len(fields) > 32:
+        return
     clean: dict[str, object] = {}
     for key, value in fields.items():
         if not isinstance(key, str) or len(key) > 32:
@@ -40,8 +44,8 @@ def note_event(data_dir: Path, **fields: object) -> None:
             prior = _event_lines(path) if path.exists() else []
             prior.append(json.dumps(row, ensure_ascii=False))
             _write(path, "\n".join(prior[-_MAX_EVENTS:]) + "\n")
-    except (OSError, UnicodeError, TypeError, ValueError, MemoryError) as exc:
-        LOG.warning("ops event was not written: %s", exc)
+    except (OSError, UnicodeError, TypeError, ValueError, MemoryError, LedgerError) as exc:
+        LOG.warning("ops event was not written: %s", str(exc)[:180])
 
 
 def note_quote(
@@ -67,10 +71,14 @@ def note_quote(
             if path.exists() and path.stat().st_size <= 1_000_000:
                 try:
                     loaded = json.loads(path.read_text(encoding="utf-8"))
-                except (OSError, UnicodeError, json.JSONDecodeError, MemoryError):
+                except (OSError, UnicodeError, json.JSONDecodeError, MemoryError, RecursionError):
                     loaded = None
-                if isinstance(loaded, dict) and len(loaded) <= 32:
-                    raw = loaded
+                if isinstance(loaded, dict) and len(loaded) <= 32 and not structure_too_deep(loaded):
+                    raw = {
+                        key: value
+                        for key, value in loaded.items()
+                        if isinstance(key, str) and len(key) <= 32
+                    }
             raw[symbol] = {
                 "at": _now(),
                 "mexc": venues[0],
@@ -81,8 +89,8 @@ def note_quote(
                 "width_bps": width,
             }
             _write(path, json.dumps(raw, indent=2))
-    except (OSError, UnicodeError, TypeError, ValueError, MemoryError) as exc:
-        LOG.warning("ops quote was not written: %s", exc)
+    except (OSError, UnicodeError, TypeError, ValueError, MemoryError, LedgerError) as exc:
+        LOG.warning("ops quote was not written: %s", str(exc)[:180])
 
 
 def _venue_text(value: object) -> str:
@@ -111,7 +119,7 @@ def _event_lines(path: Path) -> list[str]:
         text = text.split("\n", 1)[-1]
     else:
         text = path.read_text(encoding="utf-8")
-    return [line for line in text.splitlines() if line.strip()]
+    return [line for line in text.splitlines() if line.strip() and len(line) <= 4_096]
 
 
 def _now() -> str:
@@ -119,7 +127,7 @@ def _now() -> str:
 
 
 def _write(path: Path, text: str) -> None:
-    from spotbot.state import write_atomic
+    from spotbot.state import LedgerError, write_atomic
 
     write_atomic(path, text)
 
@@ -132,5 +140,5 @@ def note_heartbeat(data_dir: Path, book: str) -> None:
         data_dir.mkdir(parents=True, exist_ok=True)
         payload = {"at": _now(), "book": book}
         _write(data_dir / "ops_heartbeat.json", json.dumps(payload))
-    except (OSError, UnicodeError, TypeError, ValueError, MemoryError) as exc:
-        LOG.warning("ops heartbeat was not written: %s", exc)
+    except (OSError, UnicodeError, TypeError, ValueError, MemoryError, LedgerError) as exc:
+        LOG.warning("ops heartbeat was not written: %s", str(exc)[:180])

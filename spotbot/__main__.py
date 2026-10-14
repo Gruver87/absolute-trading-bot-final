@@ -25,7 +25,28 @@ from spotbot.state import LedgerError, hold_ledger
 CYCLE_HOLDS = (MoneyError, ValueError, TypeError)
 
 
+def _env_too_big(path: Path) -> bool:
+    """A planted env file is not read. A missing file is the normal paper start."""
+    if not path.exists():
+        return False
+    try:
+        return path.stat().st_size > 65_536
+    except OSError:
+        return True
+
+
+def _log_line(exc: BaseException) -> str:
+    """A cycle error stays on one line. The body is not copied into the log."""
+    text = str(exc)
+    return text if len(text) <= 180 else text[:180]
+
+
 def main(argv: list[str] | None = None) -> int:
+    given = list(sys.argv[1:] if argv is None else argv)
+    if len(given) > 16 or any(not isinstance(item, str) or len(item) > 32 for item in given):
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+        logging.error("command is too wide")
+        return 2
     parser = argparse.ArgumentParser(description="MEXC spot bot, paper by default")
     parser.add_argument("--live", action="store_true", help="send real orders; also requires SPOT_LIVE=1")
     parser.add_argument("--mode", choices=("rsi", "liquidity"), default=None)
@@ -40,9 +61,14 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="also serve the read-only page on 127.0.0.1:19280",
     )
-    args = parser.parse_args(argv)
+    args = parser.parse_args(given)
     root = Path(__file__).resolve().parents[1]
-    load_dotenv(root / ".env")
+    env_path = root / ".env"
+    if _env_too_big(env_path):
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+        logging.error("env file is too large")
+        return 2
+    load_dotenv(env_path)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     data_dir = root / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -52,13 +78,13 @@ def main(argv: list[str] | None = None) -> int:
     try:
         cfg = load_config(live_flag=args.live, mode=args.mode)
     except ConfigError as exc:
-        logging.error("%s", exc)
+        logging.error("%s", _log_line(exc))
         return 2
     if args.ops:
         try:
             ops_port = parse_ops_port(os.environ.get("SPOT_OPS_PORT", str(DEFAULT_PORT)))
         except OpsError as exc:
-            logging.error("%s", exc)
+            logging.error("%s", _log_line(exc))
             return 2
         threading.Thread(target=serve, args=(data_dir, ops_port), name="spot-ops", daemon=True).start()
         logging.info("ops http://127.0.0.1:%s", ops_port)
@@ -67,7 +93,7 @@ def main(argv: list[str] | None = None) -> int:
         with hold_ledger(ledger_dir(data_dir, cfg.live)):
             return _trade(args, cfg, client, data_dir)
     except LedgerError as exc:
-        logging.error("%s", exc)
+        logging.error("%s", _log_line(exc))
         return 2
 
 
@@ -79,16 +105,16 @@ def _trade(args: argparse.Namespace, cfg: Config, client: MexcClient, data_dir: 
             try:
                 run_sleeves(cfg, client, data_dir)
             except (SleeveError, LedgerError) as exc:
-                logging.error("%s", exc)
+                logging.error("%s", _log_line(exc))
                 return 2
             except MexcRateLimit as exc:
-                logging.error("cycle failed closed: %s", exc)
+                logging.error("cycle failed closed: %s", _log_line(exc))
                 if args.once:
                     return 1
                 pause = backoff_sec(exc.retry_after_sec, cfg.interval_sec)
                 logging.error("rate limit pause %ss", pause)
             except MexcError as exc:
-                logging.error("cycle failed closed: %s", exc)
+                logging.error("cycle failed closed: %s", _log_line(exc))
                 if args.once:
                     return 1
                 pause = cfg.interval_sec
@@ -98,7 +124,7 @@ def _trade(args: argparse.Namespace, cfg: Config, client: MexcClient, data_dir: 
                     return 1
                 pause = cfg.interval_sec
             except OSError as exc:
-                logging.error("cycle paused, the link failed: %s", exc)
+                logging.error("cycle paused, the link failed: %s", _log_line(exc))
                 if args.once:
                     return 1
                 pause = cfg.interval_sec
@@ -116,13 +142,13 @@ def _trade(args: argparse.Namespace, cfg: Config, client: MexcClient, data_dir: 
         try:
             run_cycle(cfg, client, book_path)
         except MexcRateLimit as exc:
-            logging.error("cycle failed closed: %s", exc)
+            logging.error("cycle failed closed: %s", _log_line(exc))
             if args.once:
                 return 1
             pause = backoff_sec(exc.retry_after_sec, cfg.interval_sec)
             logging.error("rate limit pause %ss", pause)
         except (MexcError, LedgerError) as exc:
-            logging.error("cycle failed closed: %s", exc)
+            logging.error("cycle failed closed: %s", _log_line(exc))
             if args.once:
                 return 1
             pause = cfg.interval_sec
@@ -132,7 +158,7 @@ def _trade(args: argparse.Namespace, cfg: Config, client: MexcClient, data_dir: 
                 return 1
             pause = cfg.interval_sec
         except OSError as exc:
-            logging.error("cycle paused, the link failed: %s", exc)
+            logging.error("cycle paused, the link failed: %s", _log_line(exc))
             if args.once:
                 return 1
             pause = cfg.interval_sec

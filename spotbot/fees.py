@@ -35,7 +35,7 @@ def paper_buy(spend_micro: int, price_micro: int, taker_bps: int) -> tuple[int, 
         or not isinstance(taker_bps, int)
     ):
         return 0, 0
-    if price_micro <= 0 or spend_micro <= 0 or price_micro >= _MAX_AMOUNT or spend_micro >= _MAX_AMOUNT or taker_bps > 100:
+    if price_micro <= 0 or spend_micro <= 0 or price_micro >= _MAX_AMOUNT or spend_micro >= _MAX_AMOUNT or taker_bps < 0 or taker_bps > 100:
         return 0, 0
     fee = fee_on(spend_micro, taker_bps)
     net = spend_micro - fee
@@ -55,7 +55,7 @@ def paper_sell(base_atoms: int, price_micro: int, taker_bps: int) -> tuple[int, 
         or not isinstance(taker_bps, int)
     ):
         return 0, 0
-    if base_atoms <= 0 or price_micro <= 0 or base_atoms >= _MAX_AMOUNT or price_micro >= _MAX_AMOUNT or taker_bps > 100:
+    if base_atoms <= 0 or price_micro <= 0 or base_atoms >= _MAX_AMOUNT or price_micro >= _MAX_AMOUNT or taker_bps < 0 or taker_bps > 100:
         return 0, 0
     try:
         gross = notional_micro(base_atoms, price_micro)

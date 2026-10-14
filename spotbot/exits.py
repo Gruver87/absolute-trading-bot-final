@@ -22,7 +22,7 @@ def exit_reason(
     trail_gap_bps: int,
 ) -> str | None:
     nums = (entry, price, peak, stop_bps, take_bps, trail_arm_bps, trail_gap_bps)
-    if any(isinstance(item, bool) or not isinstance(item, int) for item in nums) or min(stop_bps, take_bps, trail_arm_bps, trail_gap_bps) <= 0:
+    if any(isinstance(item, bool) or not isinstance(item, int) for item in nums) or min(stop_bps, take_bps, trail_arm_bps, trail_gap_bps) <= 0 or peak < 0 or peak >= 10**24:
         raise ValueError("exit percents must be positive")
     profit = pnl_bps(entry, price)
     peak_profit = pnl_bps(entry, max(peak, price))

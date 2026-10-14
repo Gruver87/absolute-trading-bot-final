@@ -76,6 +76,13 @@ def snapshot(data_dir: Path, port: int = DEFAULT_PORT) -> dict[str, object]:
     }
 
 
+def _ops_path(raw: object) -> str | None:
+    """The page path only. A long query is not read as a route."""
+    if not isinstance(raw, str) or len(raw) > 256:
+        return None
+    return raw.split("?", 1)[0]
+
+
 def serve(data_dir: Path, port: int = DEFAULT_PORT) -> None:
     check_ops_port(port)
     httpd = ThreadingHTTPServer(("127.0.0.1", port), _Handler)
@@ -87,7 +94,10 @@ class _Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def do_GET(self) -> None:  # noqa: N802
-        path = self.path.split("?", 1)[0]
+        path = _ops_path(self.path)
+        if path is None:
+            self._send(404, "text/plain; charset=utf-8", b"not found")
+            return
         if path == "/api/status":
             data_dir = self.server.data_dir  # type: ignore[attr-defined]
             port = int(self.server.server_address[1])
@@ -153,6 +163,12 @@ def _public(value: object, depth: int = 0) -> object:
         return "unreadable"
     if isinstance(value, str):
         return value if len(value) <= 180 else value[:180]
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, int):
+        if value <= -10**24 or value >= 10**24:
+            return "unreadable"
+        return value
     if isinstance(value, dict):
         if len(value) > 64:
             return "unreadable"
@@ -165,7 +181,7 @@ def _public(value: object, depth: int = 0) -> object:
         if len(value) > 32:
             return "unreadable"
         return [_public(item, depth + 1) for item in value]
-    return value
+    return "unreadable"
 
 
 def _hidden(key: str) -> bool:
@@ -177,7 +193,7 @@ def _read_json(path: Path) -> object | None:
     """None when the file cannot be read. One bad file must not blank the page."""
     try:
         return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError, MemoryError):
+    except (OSError, UnicodeError, json.JSONDecodeError, MemoryError, RecursionError):
         return None
 
 
@@ -191,7 +207,7 @@ def _heartbeat(data_dir: Path) -> dict[str, object] | None:
     except OSError:
         return None
     loaded = _read_json(path)
-    if not isinstance(loaded, dict):
+    if not isinstance(loaded, dict) or len(loaded) > 8:
         return None
     stamp = loaded.get("at")
     if not isinstance(stamp, str) or not stamp or len(stamp) > 40:
@@ -254,11 +270,11 @@ def _events(data_dir: Path) -> list[object]:
     except OSError:
         return []
     for line in text.splitlines():
-        if not line.strip():
+        if not line.strip() or len(line) > 4_096:
             continue
         try:
             item = json.loads(line)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, RecursionError, MemoryError):
             continue
         if isinstance(item, dict):
             shown = _public(item)

@@ -55,7 +55,7 @@ def drawdown_blocks(peak_micro: int, equity_micro: int, bps: int) -> bool:
     """True when the drop from the stored peak is at least bps of that peak."""
     if isinstance(peak_micro, bool) or isinstance(equity_micro, bool) or isinstance(bps, bool) or not isinstance(peak_micro, int) or not isinstance(equity_micro, int) or not isinstance(bps, int) or equity_micro < 0:
         return True
-    if peak_micro >= 10**24 or equity_micro >= 10**24:
+    if peak_micro >= 10**24 or equity_micro >= 10**24 or bps > 10_000:
         return True
     if bps <= 0 or peak_micro <= 0 or equity_micro >= peak_micro:
         return False
@@ -66,7 +66,7 @@ def note_pair_stop(book: Book, symbol: str, now: int, count: int, lock_sec: int)
     """Remember one stop. The lock starts only after enough stops inside the lookback."""
     if isinstance(now, bool) or isinstance(count, bool) or isinstance(lock_sec, bool) or not isinstance(now, int) or not isinstance(count, int) or not isinstance(lock_sec, int):
         return
-    if now < 0 or count < 2 or not usdt_symbol_ok(symbol):
+    if now <= 0 or now > 4_102_444_800 or count < 2 or not usdt_symbol_ok(symbol):
         return
     if lock_sec > 86_400:
         lock_sec = 86_400
@@ -87,10 +87,10 @@ def note_pair_stop(book: Book, symbol: str, now: int, count: int, lock_sec: int)
 
 def pair_locked(book: Book, symbol: str, now: int) -> bool:
     """True while this symbol's stop lock is still in the future."""
-    if isinstance(now, bool) or not isinstance(now, int) or not usdt_symbol_ok(symbol):
+    if isinstance(now, bool) or not isinstance(now, int) or now <= 0 or now > 4_102_444_800 or not usdt_symbol_ok(symbol):
         return True
     until = (book.pair_lock_until or {}).get(symbol, 0)
-    if isinstance(until, bool) or not isinstance(until, int):
+    if isinstance(until, bool) or not isinstance(until, int) or until > 4_102_444_800:
         return True
     return until > now
 

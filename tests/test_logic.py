@@ -2539,6 +2539,501 @@ def test_a_long_order_id_is_not_read(monkeypatch, tmp_path) -> None:
     assert len(shown) == 180
 
 
+def test_a_full_disk_is_not_another_process() -> None:
+    import errno
+
+    from spotbot.mexc import DecimalChange, MexcClient, MexcError, rank_liquid
+    from spotbot.ops_http import _ops_path
+    from spotbot.signals import entry_signal, rsi
+    from spotbot.state import _lock_held_by_other
+
+    assert _lock_held_by_other(OSError(errno.EACCES, "busy")) is True
+    assert _lock_held_by_other(OSError(errno.ENOSPC, "full")) is False
+    assert _ops_path("/api/status") == "/api/status"
+    assert _ops_path("z" * 300) is None
+    client = MexcClient("", "")
+    try:
+        client.my_trades("BTCUSDT", order_id="1" * 40)
+    except MexcError as exc:
+        assert "digits" in str(exc)
+        assert "1" * 40 not in str(exc)
+    else:
+        raise AssertionError("a long trade id must not be requested")
+    try:
+        DecimalChange("9" * 90)
+    except ValueError as exc:
+        assert "9" * 90 not in str(exc)
+    else:
+        raise AssertionError("a long percent must not be parsed")
+    row = {"symbol": "BTCUSDT", "quoteVolume": "10", "priceChangePercent": "1"}
+    assert rank_liquid([row], 1, -10_000, 10_000, 40) == []
+    assert client.liquid_usdt(1, -10, 10, 40) == []
+    assert client.liquid_usdt(10**24, -10, 10, 8) == []
+    assert rsi(None) is None
+    assert rsi([10**24] * 20) is None
+    assert rsi([100] * 20, 600) is None
+    assert entry_signal("R" * 40, [100] * 30, 101) is None
+    assert entry_signal("BTCUSDT", [100] * 30, 101) is not None
+    assert entry_signal("REPLAY", [100] * 30, 101) is not None
+
+
+def test_a_huge_file_does_not_replace_the_book(tmp_path) -> None:
+    from spotbot.exits import exit_reason
+    from spotbot.journal import note_event
+    from spotbot.mexc import MexcClient, MexcError, _query, clock_allows
+    from spotbot.ops_http import _public
+    from spotbot.signals import _ema_last
+    from spotbot.state import LedgerError, write_atomic
+
+    try:
+        write_atomic(tmp_path / "book.json", "x" * 1_000_001)
+    except LedgerError as exc:
+        assert "large" in str(exc)
+    else:
+        raise AssertionError("a file past one megabyte must not be written")
+    assert not (tmp_path / "book.json").exists()
+    note_event(tmp_path, kind="exit")
+    assert (tmp_path / "ops_events.jsonl").exists()
+    try:
+        _query({str(i): "1" for i in range(17)})
+    except MexcError as exc:
+        assert "wide" in str(exc)
+    else:
+        raise AssertionError("a wide query must not be sent")
+    try:
+        MexcClient("", "").ohlcv("BTCUSDT", "5m", 1_001)
+    except MexcError as exc:
+        assert "large" in str(exc)
+    else:
+        raise AssertionError("more than 1000 candles must not be requested")
+    assert clock_allows(1_000_000, 1_000_000, 10_001) is False
+    assert clock_allows(1_000_000, 1_000_100) is True
+    assert _public(10**24) == "unreadable"
+    assert _public(1.5) == "unreadable"
+    assert _public(True) is True
+    assert _public(5) == 5
+    assert _ema_last(None, 14) is None
+    assert _ema_last([10**24] * 20, 14) is None
+    assert _ema_last([100] * 20, 600) is None
+    try:
+        exit_reason(1_000, 1_000, 10**24, 350, 700, 300, 200)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("a ceiling peak must not be an exit")
+
+
+def test_a_long_book_text_is_not_opened(tmp_path) -> None:
+    import json
+
+    from spotbot.__main__ import _env_too_big, _log_line
+    from spotbot.rules import RuleError, parse_symbol_rule
+    from spotbot.state import LedgerError, load_book
+
+    def position(reason: str = "stop", entry: int = 1) -> dict[str, object]:
+        return {
+            "symbol": "BTCUSDT",
+            "entry_micro": entry,
+            "peak_micro": 1,
+            "quote_micro": 1,
+            "base_atoms": 1,
+            "reason": reason,
+        }
+
+    path = tmp_path / "book.json"
+    path.write_text(json.dumps({"cash_micro": 1, "positions": [position("r" * 81)]}), encoding="utf-8")
+    try:
+        load_book(path, 1)
+    except LedgerError as exc:
+        assert "long" in str(exc)
+        assert "r" * 81 not in str(exc)
+    else:
+        raise AssertionError("a long reason must not open the book")
+    path.write_text(json.dumps({"cash_micro": 1, "positions": [position(entry=10**18)]}), encoding="utf-8")
+    try:
+        load_book(path, 1)
+    except LedgerError as exc:
+        assert "large" in str(exc)
+    else:
+        raise AssertionError("a legacy price past the ceiling must not open")
+    wide = {"cash_micro": 1, "positions": []}
+    for i in range(64):
+        wide[f"extra{i}"] = 1
+    path.write_text(json.dumps(wide), encoding="utf-8")
+    try:
+        load_book(path, 1)
+    except LedgerError as exc:
+        assert "fields" in str(exc)
+    else:
+        raise AssertionError("a book with too many fields must not open")
+    fat = position()
+    for i in range(11):
+        fat[f"extra{i}"] = 1
+    path.write_text(json.dumps({"cash_micro": 1, "positions": [fat]}), encoding="utf-8")
+    try:
+        load_book(path, 1)
+    except LedgerError as exc:
+        assert "fields" in str(exc)
+    else:
+        raise AssertionError("a position with too many fields must not open")
+    path.write_text(
+        json.dumps({"cash_micro": 1, "positions": [], "pair_stops": {"S" * 40: [1]}}),
+        encoding="utf-8",
+    )
+    try:
+        load_book(path, 1)
+    except LedgerError as exc:
+        assert "S" * 40 not in str(exc)
+    else:
+        raise AssertionError("a long pair name must not open the book")
+    try:
+        parse_symbol_rule({"symbol": "BTCUSDT", "takerCommission": "9" * 10})
+    except RuleError as exc:
+        assert "range" in str(exc)
+        assert "9" * 10 not in str(exc)
+    else:
+        raise AssertionError("a huge fee must not be copied into the error")
+    assert len(_log_line(RuntimeError("z" * 400))) == 180
+    env = tmp_path / ".env"
+    assert _env_too_big(env) is False
+    env.write_text("x" * 65_537, encoding="utf-8")
+    assert _env_too_big(env) is True
+
+
+def test_a_deep_file_is_not_a_book(tmp_path) -> None:
+    import json
+
+    from spotbot.engine import _unseen, open_loss_micro
+    from spotbot.reconcile import FeeAssetError, split_commission, usdt_commission
+    from spotbot.sleeves import SleeveError, _treasury
+    from spotbot.state import Book, LedgerError, load_book
+
+    nested: object = 1
+    for _ in range(12):
+        nested = [nested]
+    path = tmp_path / "book.json"
+    path.write_text(json.dumps(nested), encoding="utf-8")
+    try:
+        load_book(path, 1)
+    except LedgerError as exc:
+        assert "deep" in str(exc)
+    else:
+        raise AssertionError("a deep file must not open as a book")
+    treasury = tmp_path / "treasury.json"
+    treasury.write_text(json.dumps(nested), encoding="utf-8")
+    try:
+        _treasury(treasury)
+    except SleeveError as exc:
+        assert "deep" in str(exc)
+    else:
+        raise AssertionError("a deep file must not open as a treasury")
+    row = {
+        "orderId": "1",
+        "id": "7",
+        "symbol": "BTCUSDT",
+        "isBuyer": True,
+        "qty": "0.5",
+        "quoteQty": "6",
+        "price": "12",
+        "commission": "0.01",
+        "commissionAsset": "X" * 40,
+    }
+    try:
+        split_commission([row], "1", "BTC", "BUY")
+    except FeeAssetError as exc:
+        assert "text" in str(exc)
+        assert "X" * 40 not in str(exc)
+    else:
+        raise AssertionError("a long commission name must not be read")
+    try:
+        usdt_commission([{"orderId": "1", "commission": "0.01", "commissionAsset": "Y" * 40}], "1")
+    except FeeAssetError as exc:
+        assert "Y" * 40 not in str(exc)
+    else:
+        raise AssertionError("a long commission name must not be summed")
+    try:
+        usdt_commission([], "nope")
+    except FeeAssetError as exc:
+        assert "digits" in str(exc)
+    else:
+        raise AssertionError("a trade id that is not digits must not be a zero fee")
+    book = Book(cash_micro=1, positions=[], realized_micro=0, seen_at=1_000)
+    assert _unseen(book, 1_100, 90_000) is True
+    assert open_loss_micro([object()] * 9, {}) == 2**62
+
+
+def test_a_wide_book_does_not_ask_the_exchange() -> None:
+    from pathlib import Path
+
+    from spotbot.engine import _close_positions, _entries_halted, _exit_fees, _roll_guard, _short, _slots_used, trading_day
+    from spotbot.mexc import MexcError, signed_payload
+    from spotbot.rules import RuleError, parse_symbol_rule
+    from spotbot.state import Book
+
+    assert paper_buy(1_000_000, 1_000_000_000_000, -1) == (0, 0)
+    assert paper_sell(100, 1_000_000_000_000, -1) == (0, 0)
+    held = Position("BTCUSDT", 1, 1, 1, 1, "stop")
+    wide = Book(cash_micro=1_000_000, positions=[held] * 9, realized_micro=0)
+    assert _close_positions(None, None, wide, Path("book.json"), "", False)[2] == ("unknown",)
+    assert _exit_fees(None, wide) is None
+    assert _slots_used(None, wide) == 14
+    ceiling = Book(cash_micro=10**24, positions=[], realized_micro=0, guard_day="")
+    _roll_guard(ceiling)
+    assert ceiling.guard_day == ""
+    today = Book(cash_micro=1_000_000, positions=[], realized_micro=-1, guard_day=trading_day(), guard_realized_micro=10**24 - 1, guard_cash_micro=1_000_000)
+    assert _entries_halted(today, 500) is True
+    marked = Book(cash_micro=1_000_000, positions=[], realized_micro=0, guard_day=trading_day(), guard_cash_micro=10**24)
+    assert _entries_halted(marked, 500) is True
+    assert _entries_halted(Book(cash_micro=1_000_000, positions=[], realized_micro=0, guard_day=trading_day()), 10_001) is True
+    row = {str(i): 1 for i in range(129)}
+    try:
+        parse_symbol_rule(row)
+        raise AssertionError("wide row")
+    except RuleError as exc:
+        assert "wide" in str(exc)
+    try:
+        signed_payload(row, False)
+        raise AssertionError("wide ack")
+    except MexcError as exc:
+        assert "wide" in str(exc)
+    assert len(_short("e" * 400)) == 180
+
+
+def test_a_wide_exchange_answer_is_not_a_price(tmp_path) -> None:
+    from spotbot.journal import note_event
+    from spotbot.liquidity import candle_lift
+    from spotbot.mexc import MexcClient, MexcError, book_prices, depth_notionals, parse_account, ticker_price
+    from spotbot.rules import RuleError, parse_symbol_rule
+
+    wide = {str(i): "1" for i in range(17)}
+    wide["symbol"] = "BTCUSDT"
+    wide["price"] = "1"
+    try:
+        ticker_price(wide, "BTCUSDT")
+        raise AssertionError("wide price")
+    except MexcError as exc:
+        assert "price" in str(exc)
+        assert "0" not in str(exc) or "BTCUSDT" in str(exc)
+    try:
+        book_prices(wide, "BTCUSDT")
+        raise AssertionError("wide book")
+    except MexcError as exc:
+        assert "wide" in str(exc)
+    try:
+        depth_notionals(wide, "BTCUSDT")
+        raise AssertionError("wide depth")
+    except MexcError as exc:
+        assert "wide" in str(exc)
+    account = {"balances": [{"asset": "USDT", "free": "1", "locked": "0", **{str(i): "1" for i in range(14)}}]}
+    try:
+        parse_account(account)
+        raise AssertionError("wide balance")
+    except MexcError as exc:
+        assert "wide" in str(exc)
+        assert "USDT" not in str(exc)
+    fat = {"balances": [], **{str(i): 1 for i in range(32)}}
+    try:
+        parse_account(fat)
+        raise AssertionError("wide account")
+    except MexcError as exc:
+        assert "wide" in str(exc)
+    client = MexcClient("", "")
+    client._public = lambda *_args, **_kwargs: {str(i): 1 for i in range(9)}
+    try:
+        client.server_time_ms()
+        raise AssertionError("wide time")
+    except MexcError as exc:
+        assert "object" in str(exc)
+    client._public = lambda *_args, **_kwargs: {"serverTime": 10**15}
+    try:
+        client.server_time_ms()
+        raise AssertionError("far time")
+    except MexcError as exc:
+        assert "timestamp" in str(exc)
+        assert "15" not in str(exc) or len(str(exc)) < 80
+    client._public = lambda *_args, **_kwargs: {str(i): 1 for i in range(17)}
+    try:
+        client.symbol_rule("BTCUSDT")
+        raise AssertionError("wide info")
+    except MexcError as exc:
+        assert "wide" in str(exc)
+    try:
+        parse_symbol_rule({"symbol": "BTCUSDT", "filters": [1] * 65})
+        raise AssertionError("long list")
+    except RuleError as exc:
+        assert "list" in str(exc)
+    note_event(tmp_path, **{f"k{i}": 1 for i in range(33)})
+    assert not (tmp_path / "ops_events.jsonl").exists()
+    volumes = [1] * 12 + [10**18, 1]
+    assert volume_ratio_bps(volumes) is None
+    assert candle_lift("R" * 40, [100] * 12 + [400, 100], 2, 1, 2) is None
+    assert candle_lift("REPLAY", [100] * 12 + [400, 100], 2, 1, 2) is not None
+
+
+def test_a_wide_ticker_row_is_not_a_peer(tmp_path) -> None:
+    import json
+
+    from spotbot.guards import drawdown_blocks, note_pair_stop, pair_locked
+    from spotbot.journal import note_event, note_quote
+    from spotbot.liquidity import close_position_bps
+    from spotbot.mexc import rank_liquid
+    from spotbot.oracle import _binance_price, _bybit_price, _okx_price, cheapest_first, deviation_bps, lag_bps
+    from spotbot.reconcile import FeeAssetError, split_commission
+    from spotbot.state import Book
+
+    wide = {"symbol": "ETHUSDT", "quoteVolume": "999999", "priceChangePercent": "1"}
+    wide.update({str(i): "1" for i in range(62)})
+    names = rank_liquid(
+        [wide, {"symbol": "BTCUSDT", "quoteVolume": "10", "priceChangePercent": "1"}],
+        1,
+        -10_000,
+        10_000,
+        5,
+    )
+    assert names == ["BTCUSDT"]
+    try:
+        split_commission([{str(i): "1" for i in range(33)}], "1", "BTC", "BUY")
+        raise AssertionError("wide trade")
+    except FeeAssetError as exc:
+        assert "wide" in str(exc)
+    assert close_position_bps(2, 1, 10**20) is None
+    assert close_position_bps(2, 1, 2) == 10_000
+    assert deviation_bps(None) is None
+    assert deviation_bps([1, 10**20]) is None
+    assert lag_bps(10**20, [1]) is None
+    assert lag_bps(100, None) is None
+    assert cheapest_first(None) == []
+    assert cheapest_first([("A" * 40, 1), ("ETHUSDT", 2), ("BTCUSDT", 10**12)]) == ["ETHUSDT"]
+    assert _binance_price({"symbol": "BTCUSDT", "price": "1"}, "BTCUSDT") == "1"
+    assert _binance_price({**{str(i): "1" for i in range(16)}, "symbol": "BTCUSDT", "price": "1"}, "BTCUSDT") is None
+    assert _bybit_price({"result": {"list": [{"symbol": "BTCUSDT", "lastPrice": "1"}]}}, "BTCUSDT") == "1"
+    fat_row = {"symbol": "BTCUSDT", "lastPrice": "1", **{str(i): "1" for i in range(63)}}
+    assert _bybit_price({"result": {"list": [fat_row]}}, "BTCUSDT") is None
+    assert _okx_price({"data": [{"instId": "BTC-USDT", "last": "1"}]}, "BTC-USDT") == "1"
+    assert _okx_price({**{str(i): 1 for i in range(16)}, "data": [{"instId": "BTC-USDT", "last": "1"}]}, "BTC-USDT") is None
+    nested: list[object] = []
+    cursor = nested
+    for _ in range(12):
+        nxt: list[object] = []
+        cursor.append(nxt)
+        cursor = nxt
+    (tmp_path / "ops_quotes.json").write_text(json.dumps({"BTCUSDT": nested, "S" * 40: 1}), encoding="utf-8")
+    note_quote(tmp_path, "ETHUSDT", "1", "1", "1", "1", 1, 1)
+    kept = json.loads((tmp_path / "ops_quotes.json").read_text(encoding="utf-8"))
+    assert list(kept) == ["ETHUSDT"]
+    (tmp_path / "ops_events.jsonl").write_text(("x" * 5_000) + "\n", encoding="utf-8")
+    note_event(tmp_path, kind="ok")
+    stored = (tmp_path / "ops_events.jsonl").read_text(encoding="utf-8")
+    assert "x" * 5_000 not in stored
+    assert "ok" in stored
+    assert drawdown_blocks(1_000_000, 900_000, 10_001) is True
+    book = Book(cash_micro=1, positions=[], realized_micro=0)
+    note_pair_stop(book, "BTCUSDT", 10**15, 2, 60)
+    assert not book.pair_stops
+    book.pair_lock_until = {"BTCUSDT": 10**15}
+    assert pair_locked(book, "BTCUSDT", 1_700_000_000) is True
+
+
+def test_a_long_command_does_not_start(tmp_path) -> None:
+    from pathlib import Path
+
+    from spotbot.__main__ import main
+    from spotbot.engine import _sibling_positions, sibling_pending
+    from spotbot.reconcile import FeeAssetError, usdt_commission
+    from spotbot.rules import RuleError, parse_symbol_rule
+    from spotbot.state import LedgerError
+
+    assert sibling_pending((Path(("N" * 40) + ".json"),)) == "sibling book name is too long"
+    try:
+        _sibling_positions((Path(("N" * 40) + ".json"),))
+        raise AssertionError("stem")
+    except LedgerError as exc:
+        assert "long" in str(exc)
+        assert "N" * 40 not in str(exc)
+    assert main(["--flag"] * 17) == 2
+    assert main(["--" + "a" * 31]) == 2
+    try:
+        usdt_commission([{str(i): "1" for i in range(33)}], "1")
+        raise AssertionError("wide fee")
+    except FeeAssetError as exc:
+        assert "wide" in str(exc)
+    try:
+        parse_symbol_rule({"symbol": "BTCUSDT", "filters": [{str(i): 1 for i in range(33)}]})
+        raise AssertionError("wide filter")
+    except RuleError as exc:
+        assert "wide" in str(exc)
+        assert "0" not in str(exc) or "wide" in str(exc)
+    deep: object = "x"
+    for _ in range(8):
+        deep = [deep]
+    try:
+        parse_symbol_rule({"symbol": "BTCUSDT", "filters": deep})
+        raise AssertionError("deep filter")
+    except RuleError as exc:
+        assert "wide" in str(exc)
+
+
+def test_a_wide_treasury_is_not_a_split(tmp_path) -> None:
+    import json
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    from spotbot.engine import _shown_name
+    from spotbot.mexc import MexcClient, MexcError, _interval_ms
+    from spotbot.ops_http import _events, _heartbeat
+    from spotbot.sleeves import SleeveError, _open_split, _treasury
+
+    assert _shown_name("A" * 40, Path("book.json")) == "book"
+    assert _shown_name("sleeve_major", Path(("B" * 40) + ".json")) == "sleeve_major"
+    assert _shown_name("", Path(("B" * 40) + ".json")) == "book"
+    try:
+        _interval_ms("m" * 20)
+        raise AssertionError("interval")
+    except MexcError as exc:
+        assert "interval" in str(exc)
+        assert "m" * 20 not in str(exc)
+    client = MexcClient("k", "s")
+    client._signed = lambda *_args, **_kwargs: [{str(i): 1 for i in range(33)}]
+    try:
+        client.my_trades("BTCUSDT")
+        raise AssertionError("wide trade")
+    except MexcError as exc:
+        assert "wide" in str(exc)
+    client._signed = lambda *_args, **_kwargs: ["nope"]
+    try:
+        client.my_trades("BTCUSDT")
+        raise AssertionError("trade object")
+    except MexcError as exc:
+        assert "object" in str(exc)
+    fat = {"funded_micro": 0, "sleeves": ["major", "alt", "meme"]}
+    fat.update({str(i): 1 for i in range(7)})
+    (tmp_path / "treasury.json").write_text(json.dumps(fat), encoding="utf-8")
+    try:
+        _treasury(tmp_path / "treasury.json")
+        raise AssertionError("wide treasury")
+    except SleeveError as exc:
+        assert "fields" in str(exc)
+    pending = {
+        "funded_micro": 0,
+        "sleeves": ["major", "alt", "meme"],
+        "pending": {"target_micro": 3, "parts": [1, 1, 1], "a": 1, "b": 1, "c": 1},
+    }
+    try:
+        _open_split(pending, 0)
+        raise AssertionError("wide split")
+    except SleeveError as exc:
+        assert "wide" in str(exc)
+    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    beat = {"at": stamp, "book": "paper"}
+    beat.update({str(i): 1 for i in range(7)})
+    (tmp_path / "ops_heartbeat.json").write_text(json.dumps(beat), encoding="utf-8")
+    assert _heartbeat(tmp_path) is None
+    long_line = json.dumps({"kind": "k" * 5_000})
+    (tmp_path / "ops_events.jsonl").write_text(long_line + "\n" + json.dumps({"kind": "ok"}) + "\n", encoding="utf-8")
+    rows = _events(tmp_path)
+    assert [row.get("kind") for row in rows] == ["ok"]
+
+
 def test_lift_needs_volume_and_bids() -> None:
     volumes = [100] * 12 + [400, 100]
     assert volume_ratio_bps(volumes) == 40_000

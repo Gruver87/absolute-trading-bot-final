@@ -113,8 +113,8 @@ def _api_path(path: object) -> str:
 
 def _query(params: object) -> dict[str, str]:
     """Query text. A number or a line break is not signed or sent."""
-    if not isinstance(params, dict):
-        raise MexcError("query is not an object")
+    if not isinstance(params, dict) or len(params) > 16:
+        raise MexcError("query is not an object" if not isinstance(params, dict) else "query is too wide")
     out: dict[str, str] = {}
     for key, value in params.items():
         if (
@@ -144,7 +144,7 @@ def clock_allows(local_ms: int, server_ms: int, limit_ms: int = 2000) -> bool:
     """True when the local clock is close enough for recvWindow=5000."""
     if isinstance(local_ms, bool) or isinstance(server_ms, bool) or isinstance(limit_ms, bool) or not isinstance(local_ms, int) or not isinstance(server_ms, int) or not isinstance(limit_ms, int):
         return False
-    if local_ms < 0 or server_ms <= 0 or limit_ms < 0 or local_ms >= 10**15 or server_ms >= 10**15 or limit_ms >= 10**15:
+    if local_ms < 0 or server_ms <= 0 or limit_ms < 0 or local_ms >= 10**15 or server_ms >= 10**15 or limit_ms > 10_000:
         return False
     return abs(local_ms - server_ms) <= limit_ms
 
@@ -177,6 +177,8 @@ class MexcClient:
         if not isinstance(interval, str) or not interval:
             raise MexcError("kline interval is not text")
         _public_limit(limit, "kline")
+        if limit > 1_000:
+            raise MexcError("kline limit is too large")
         _interval_ms(interval)
         payload = self._public(
             "/api/v3/klines",
@@ -211,7 +213,9 @@ class MexcClient:
     def liquid_usdt(self, min_quote_micro: int, change_min_bps: int, change_max_bps: int, cap: int) -> list[str]:
         """USDT pairs whose 24h quote volume is real and whose move has started, not finished."""
         bounds = (min_quote_micro, change_min_bps, change_max_bps, cap)
-        if any(isinstance(item, bool) or not isinstance(item, int) for item in bounds) or cap < 1:
+        if any(isinstance(item, bool) or not isinstance(item, int) for item in bounds) or cap < 1 or cap > 32:
+            return []
+        if min_quote_micro >= 10**24 or change_min_bps <= -10**9 or change_max_bps >= 10**9:
             return []
         payload = self._public("/api/v3/ticker/24hr", {})
         if not isinstance(payload, list):
@@ -226,9 +230,12 @@ class MexcClient:
     def server_time_ms(self) -> int:
         """Exchange clock in milliseconds. Public, no order."""
         payload = self._public("/api/v3/time", {})
-        if not isinstance(payload, dict):
+        if not isinstance(payload, dict) or len(payload) > 8:
             raise MexcError("server time is not an object")
-        return positive_int(payload.get("serverTime"), "server time")
+        stamp = positive_int(payload.get("serverTime"), "server time")
+        if stamp >= 10**15:
+            raise MexcError("server time is not a timestamp")
+        return stamp
 
     def symbol_rule(self, symbol: str) -> SymbolRule:
         if not isinstance(symbol, str) or not symbol:
@@ -241,8 +248,8 @@ class MexcClient:
         if cached is not None:
             return cached
         payload = self._public("/api/v3/exchangeInfo", {"symbol": symbol})
-        if not isinstance(payload, dict):
-            raise MexcError(f"no exchangeInfo for {symbol}")
+        if not isinstance(payload, dict) or len(payload) > 16:
+            raise MexcError(f"no exchangeInfo for {symbol}" if not isinstance(payload, dict) else "exchangeInfo is too wide")
         rows = payload.get("symbols")
         if not isinstance(rows, list) or not rows or not isinstance(rows[0], dict):
             raise MexcError(f"no exchangeInfo row for {symbol}")
@@ -346,7 +353,7 @@ class MexcClient:
         _public_limit(limit, "trade")
         if not isinstance(order_id, str):
             raise MexcError("trade order id is not text")
-        if order_id and (not order_id.isdigit() or len(order_id) > 32):
+        if order_id and (len(order_id) > 32 or not order_id.isdigit()):
             raise MexcError("trade order id is not digits")
         params = {"symbol": symbol, "limit": str(limit)}
         if order_id:
@@ -356,6 +363,11 @@ class MexcClient:
             raise MexcError(f"trades for {symbol} are not a list")
         if len(body) >= limit:
             raise MexcError(f"trades for {symbol} filled the page, fee is incomplete")
+        for row in body:
+            if not isinstance(row, dict):
+                raise MexcError("trade row is not an object")
+            if len(row) > 32:
+                raise MexcError("trade row is too wide")
         return body
 
     def spot_balances(self) -> tuple[int, int, dict[str, int], dict[str, int]]:
@@ -435,6 +447,8 @@ def _order_request(symbol: str, client_order_id: str, size: int) -> None:
 def signed_payload(body: object, as_list: bool) -> Any:
     """An order ack is an object. The trade list is a list. An error object is neither."""
     if isinstance(body, dict):
+        if len(body) > 128:
+            raise MexcError("order response is too wide")
         _reject_exchange_code(body)
         if as_list:
             raise MexcError("order response is not a list")
@@ -456,7 +470,7 @@ def _interval_ms(interval: str) -> int:
         "4h": 14_400_000,
         "1d": 86_400_000,
     }
-    if not isinstance(interval, str):
+    if not isinstance(interval, str) or len(interval) > 8:
         raise MexcError("kline interval is not used")
     span = spans.get(interval)
     if span is None:
@@ -479,11 +493,13 @@ def rank_liquid(
     if len(payload) > 20_000:
         raise MexcError("24h ticker is too large")
     bounds = (min_quote_micro, change_min_bps, change_max_bps, cap)
-    if any(isinstance(item, bool) or not isinstance(item, int) for item in bounds) or cap < 1:
+    if any(isinstance(item, bool) or not isinstance(item, int) for item in bounds) or cap < 1 or cap > 32:
+        return []
+    if min_quote_micro >= 10**24 or change_min_bps <= -10**9 or change_max_bps >= 10**9:
         return []
     best: dict[str, int] = {}
     for item in payload:
-        if not isinstance(item, dict):
+        if not isinstance(item, dict) or len(item) > 64:
             continue
         symbol = item.get("symbol")
         if not isinstance(symbol, str) or not usdt_symbol_ok(symbol):
@@ -510,6 +526,8 @@ def rank_liquid(
 def ticker_price(payload: object, symbol: str) -> int:
     """Last price only when the row names the requested pair."""
     symbol = _pair_name(symbol)
+    if isinstance(payload, dict) and len(payload) > 16:
+        raise MexcError(f"no price for {symbol}")
     if not isinstance(payload, dict) or "price" not in payload:
         raise MexcError(f"no price for {symbol}")
     named = payload.get("symbol")
@@ -524,8 +542,8 @@ def ticker_price(payload: object, symbol: str) -> int:
 def depth_notionals(payload: object, symbol: str) -> tuple[int, int]:
     """Bid and ask notional. An empty side or a crossed top is not a book."""
     symbol = _pair_name(symbol)
-    if not isinstance(payload, dict):
-        raise MexcError(f"no depth for {symbol}")
+    if not isinstance(payload, dict) or len(payload) > 16:
+        raise MexcError(f"no depth for {symbol}" if not isinstance(payload, dict) else f"depth for {symbol} is too wide")
     named = payload.get("symbol")
     if named not in (None, "") and (not isinstance(named, str) or named != symbol):
         raise MexcError(f"depth is not {symbol}")
@@ -604,6 +622,8 @@ def DecimalChange(text: str) -> int:
     """24h percent string to basis points, truncating toward zero."""
     from decimal import Decimal, ROUND_DOWN
 
+    if not isinstance(text, str) or len(text) > 80:
+        raise ValueError("change is not decimal")
     raw = text.strip()
     if not raw:
         raise ValueError("empty change")
@@ -679,8 +699,8 @@ def positive_int(raw: object, label: str) -> int:
 def book_prices(payload: object, symbol: str) -> tuple[int, int]:
     """Best bid and ask. A zero or crossed book is refused."""
     symbol = _pair_name(symbol)
-    if not isinstance(payload, dict):
-        raise MexcError(f"no book ticker for {symbol}")
+    if not isinstance(payload, dict) or len(payload) > 16:
+        raise MexcError(f"no book ticker for {symbol}" if not isinstance(payload, dict) else f"book ticker for {symbol} is too wide")
     try:
         bid = _book_side(payload.get("bidPrice"))
         ask = _book_side(payload.get("askPrice"))
@@ -1008,8 +1028,8 @@ def _sell_credit(body: dict[str, Any], base_asset: str) -> tuple[int, int, int]:
 
 def parse_account(payload: dict[str, Any]) -> tuple[int, int, dict[str, int], dict[str, int]]:
     """Total USDT, free USDT, total base atoms, and free base atoms."""
-    if not isinstance(payload, dict):
-        raise MexcError("account balances missing")
+    if not isinstance(payload, dict) or len(payload) > 32:
+        raise MexcError("account balances missing" if not isinstance(payload, dict) else "account response is too wide")
     rows = payload.get("balances")
     if not isinstance(rows, list) or len(rows) > 5_000:
         raise MexcError("account balances missing" if not isinstance(rows, list) else "account has too many balances")
@@ -1019,8 +1039,8 @@ def parse_account(payload: dict[str, Any]) -> tuple[int, int, dict[str, int], di
     free_bases: dict[str, int] = {}
     seen: set[str] = set()
     for row in rows:
-        if not isinstance(row, dict):
-            raise MexcError("balance row is not an object")
+        if not isinstance(row, dict) or len(row) > 16:
+            raise MexcError("balance row is not an object" if not isinstance(row, dict) else "balance row is too wide")
         raw_asset = row.get("asset")
         if raw_asset in (None, ""):
             asset = ""

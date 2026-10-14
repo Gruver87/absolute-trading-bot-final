@@ -31,14 +31,17 @@ def volume_ratio_bps(quote_volumes: list[int]) -> int | None:
     median = prior[len(prior) // 2]
     if median <= 0 or closed <= 0:
         return None
-    return closed * 10_000 // median
+    ratio = closed * 10_000 // median
+    if ratio >= 1_000_000_000:
+        return None
+    return ratio
 
 
 def close_position_bps(high: int, low: int, close: int) -> int | None:
     if not _fit(high) or not _fit(low) or not _fit(close):
         return None
     span = high - low
-    if span <= 0 or close <= 0:
+    if span <= 0 or close <= 0 or close < low or close > high:
         return None
     return (close - low) * 10_000 // span
 
@@ -53,7 +56,7 @@ def candle_lift(
     min_close_pos_bps: int = 6_500,
 ) -> Lift | None:
     """Volume and close location only. The live buy also requires the book."""
-    if not isinstance(symbol, str) or isinstance(min_volume_bps, bool) or isinstance(min_close_pos_bps, bool):
+    if not isinstance(symbol, str) or len(symbol) > 32 or isinstance(min_volume_bps, bool) or isinstance(min_close_pos_bps, bool):
         return None
     if not isinstance(min_volume_bps, int) or not isinstance(min_close_pos_bps, int):
         return None

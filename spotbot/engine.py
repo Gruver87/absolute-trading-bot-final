@@ -93,7 +93,7 @@ def run_cycle(
     client.forget_rules()
     book = load_book(path, cfg.paper_cash_micro)
     bind_ledger(book, cfg.live)
-    name = book_name or path.stem
+    name = _shown_name(book_name, path)
     exits, entries, skipped = 0, 0, 0
     marks: dict[str, int] = {}
     unmarked: tuple[str, ...] = ()
@@ -106,7 +106,7 @@ def run_cycle(
         other_pending = sibling_pending(sibling_paths) if cfg.live else None
         known_order = other_pending is not None and " pending " in other_pending
         if other_pending:
-            LOG.warning("sibling book blocks entries: %s", other_pending)
+            LOG.warning("sibling book blocks entries: %s", _short(other_pending))
         orders_allowed = clock_ok and not known_order
         exits, marks, unmarked = _close_positions(cfg, client, book, path, name, orders_allowed)
         pending_problem = _resolve_pending(client, book, path) if cfg.live and book.pending_client_id else None
@@ -126,15 +126,20 @@ def run_cycle(
             elif unpriced:
                 LOG.warning("entry halt book=%s equity is not priced after the sell fee", name)
             elif drawn:
-                LOG.warning("drawdown halt book=%s peak=%s", name, book.equity_peak_micro)
+                shown_peak = book.equity_peak_micro
+                if isinstance(shown_peak, bool) or not isinstance(shown_peak, int) or shown_peak < 0 or shown_peak >= 10**24:
+                    shown_peak = "unreadable"
+                LOG.warning("drawdown halt book=%s peak=%s", name, shown_peak)
             else:
                 LOG.warning("daily loss halt book=%s", name)
         if conflict:
-            LOG.warning("account mismatch book=%s %s", name, conflict)
+            LOG.warning("account mismatch book=%s %s", name, _short(conflict))
         if pending_problem:
-            LOG.warning("pending order book=%s %s", name, pending_problem)
+            LOG.warning("pending order book=%s %s", name, _short(pending_problem))
         if cooled:
-            LOG.warning("stop cooldown book=%s until=%s", name, book.cooldown_until)
+            until = book.cooldown_until
+            shown_until = until if isinstance(until, int) and not isinstance(until, bool) and 0 <= until <= 4_102_444_800 else "unreadable"
+            LOG.warning("stop cooldown book=%s until=%s", name, shown_until)
         if not orders_allowed:
             LOG.warning("live orders paused book=%s", name)
         if not cfg.entries:
@@ -149,7 +154,7 @@ def run_cycle(
             entries, skipped = _open_positions(cfg, client, book, path, name, deadline)
     except MexcRateLimit as exc:
         limited = exc
-        LOG.warning("rate limit, cycle stopped and the book is kept: %s", exc)
+        LOG.warning("rate limit, cycle stopped and the book is kept: %s", _short(str(exc)))
     else:
         limited = None
     finally:
@@ -249,6 +254,8 @@ def _unseen(book: Book, now: int, interval_sec: int) -> bool:
         return False
     if book.seen_at > now:
         return True
+    if interval_sec < 1 or interval_sec > 86_400:
+        return True
     return now - book.seen_at > max(interval_sec * 2, 180)
 
 
@@ -314,6 +321,8 @@ def _close_positions(
     closed = 0
     marks: dict[str, int] = {}
     unmarked: list[str] = []
+    if not isinstance(book.positions, list) or len(book.positions) > 8:
+        return 0, {}, ("unknown",)
     for pos in list(book.positions):
         step = _lot_step(client, pos.symbol)
         dust = step is not None and not uses_slot(pos.base_atoms, step)
@@ -322,7 +331,7 @@ def _close_positions(
         except MexcRateLimit:
             raise
         except MexcError as exc:
-            LOG.warning("book ticker failed, position kept: %s", exc)
+            LOG.warning("book ticker failed, position kept: %s", _short(str(exc)))
             unmarked.append(pos.symbol)
             kept.append(pos)
             continue
@@ -355,7 +364,7 @@ def _close_positions(
             except MexcRateLimit:
                 raise
             except MexcError as exc:
-                LOG.warning("depth failed, position kept: %s", exc)
+                LOG.warning("depth failed, position kept: %s", _short(str(exc)))
                 kept.append(pos)
                 continue
             if ask_wall_exit(bid_notional, ask_notional, pnl_bps(pos.entry_micro, price)):
@@ -400,7 +409,7 @@ def _close_positions(
             except MexcRateLimit:
                 raise
             except MexcError as exc:
-                LOG.warning("rules %s, sell kept: %s", pos.symbol, exc)
+                LOG.warning("rules %s, sell kept: %s", pos.symbol, _short(str(exc)))
                 kept.append(pos)
                 continue
             sell_atoms = round_base_atoms(pos.base_atoms, rule.base_step_atoms)
@@ -413,7 +422,7 @@ def _close_positions(
             except MexcRateLimit:
                 raise
             except MexcError as exc:
-                LOG.warning("balance read failed, sell kept: %s", exc)
+                LOG.warning("balance read failed, sell kept: %s", _short(str(exc)))
                 kept.append(pos)
                 continue
             if not _base_matches(pos.symbol, rule.base_asset):
@@ -458,11 +467,11 @@ def _close_positions(
                 raise
             except MexcOrderAccepted as exc:
                 _keep_exchange_ack(book, path, exc)
-                LOG.warning("sell failed, position kept: %s", exc)
+                LOG.warning("sell failed, position kept: %s", _short(str(exc)))
                 kept.append(pos)
                 continue
             except MexcError as exc:
-                LOG.warning("sell failed, position kept: %s", exc)
+                LOG.warning("sell failed, position kept: %s", _short(str(exc)))
                 kept.append(pos)
                 continue
             credit = fill.quote_micro
@@ -534,7 +543,7 @@ def _close_positions(
         except MexcRateLimit:
             raise
         except MexcError as exc:
-            LOG.warning("rules %s, paper sell kept: %s", pos.symbol, exc)
+            LOG.warning("rules %s, paper sell kept: %s", pos.symbol, _short(str(exc)))
             kept.append(pos)
             continue
         if not _base_matches(pos.symbol, rule.base_asset):
@@ -626,7 +635,7 @@ def _open_positions(
         except MexcRateLimit:
             raise
         except MexcError as exc:
-            LOG.warning("klines failed: %s", exc)
+            LOG.warning("klines failed: %s", _short(str(exc)))
             skipped += 1
             continue
         if len(closes) < 2:
@@ -645,7 +654,7 @@ def _open_positions(
         except MexcRateLimit:
             raise
         except MexcError as exc:
-            LOG.warning("book ticker failed: %s", exc)
+            LOG.warning("book ticker failed: %s", _short(str(exc)))
             skipped += 1
             continue
         if not follows_close(closed[-1], price):
@@ -704,7 +713,7 @@ def _open_liquidity(
         except MexcRateLimit:
             raise
         except MexcError as exc:
-            LOG.warning("ticker scan failed: %s", exc)
+            LOG.warning("ticker scan failed: %s", _short(str(exc)))
             return 0, 1
     LOG.info("liquidity candidates=%s", ",".join(symbols) if symbols else "none")
     probes: dict[str, tuple[list[tuple[int, int, int, int, int]], int, int, dict[str, int]]] = {}
@@ -716,10 +725,10 @@ def _open_liquidity(
         try:
             probes[symbol] = _probe_lift(client, symbol)
         except MexcRateLimit as exc:
-            LOG.warning("rate limit, stop scan: %s", exc)
+            LOG.warning("rate limit, stop scan: %s", _short(str(exc)))
             raise
         except MexcError as exc:
-            LOG.warning("lift check failed: %s", exc)
+            LOG.warning("lift check failed: %s", _short(str(exc)))
             skipped += 1
     ready: list[tuple[int, int, str, int, str]] = []
     for symbol in symbols:
@@ -748,7 +757,7 @@ def _open_liquidity(
         except MexcRateLimit:
             raise
         except MexcError as exc:
-            LOG.warning("book ticker failed: %s", exc)
+            LOG.warning("book ticker failed: %s", _short(str(exc)))
             skipped += 1
             continue
         if not follows_close(closed[3], price):
@@ -843,7 +852,7 @@ def _try_buy(
     except MexcRateLimit:
         raise
     except MexcError as exc:
-        LOG.warning("rules %s: %s", symbol, exc)
+        LOG.warning("rules %s: %s", symbol, _short(str(exc)))
         return False
     if not rule.tradable:
         LOG.info("skip %s: %s", symbol, rule.refuse_reason)
@@ -856,12 +865,15 @@ def _try_buy(
     except MexcRateLimit:
         raise
     except MexcError as exc:
-        LOG.warning("book ticker %s, skip buy: %s", symbol, exc)
+        LOG.warning("book ticker %s, skip buy: %s", symbol, _short(str(exc)))
         return False
     try:
         spread = top_spread_bps(_bid, ask)
     except ValueError:
         LOG.info("skip %s: book is crossed or empty", symbol)
+        return False
+    if spread >= 1_000_000_000:
+        LOG.info("skip %s: spread is too wide", symbol)
         return False
     if spread_blocks(spread, cfg.spread_bps):
         LOG.info("skip %s: spread %s bps", symbol, spread)
@@ -889,7 +901,7 @@ def _try_buy(
         except MexcRateLimit:
             raise
         except MexcError as exc:
-            LOG.warning("balance read failed, skip buy: %s", exc)
+            LOG.warning("balance read failed, skip buy: %s", _short(str(exc)))
             return False
         spend = cap_spend(
             spend,
@@ -914,10 +926,10 @@ def _try_buy(
             raise
         except MexcOrderAccepted as exc:
             _keep_exchange_ack(book, path, exc)
-            LOG.warning("buy failed, left pending: %s", exc)
+            LOG.warning("buy failed, left pending: %s", _short(str(exc)))
             return False
         except MexcError as exc:
-            LOG.warning("buy failed, left pending: %s", exc)
+            LOG.warning("buy failed, left pending: %s", _short(str(exc)))
             return False
         fee = fill.fee_micro
         if fill.client_order_id != client_id:
@@ -1194,7 +1206,7 @@ def _apply_progress(
         try:
             price_micro = implied_price_micro(quote_micro, net_base)
         except MoneyError as exc:
-            LOG.warning("recovered buy has no price: %s", exc)
+            LOG.warning("recovered buy has no price: %s", _short(str(exc)))
             return False
         return apply_buy_progress(
             book,
@@ -1232,7 +1244,7 @@ def _order_fees(
     except MexcRateLimit:
         raise
     except (MexcError, FeeAssetError) as exc:
-        LOG.warning("trade fee %s: %s", symbol, exc)
+        LOG.warning("trade fee %s: %s", symbol, _short(str(exc)))
         return None
 
 
@@ -1241,12 +1253,14 @@ def sibling_pending(paths: tuple[Path, ...]) -> str | None:
     if len(paths) > 8:
         return "too many sibling books"
     for path in paths:
+        if len(path.stem) > 32:
+            return "sibling book name is too long"
         if not path.exists():
             continue
         try:
             other = load_book(path, 0)
         except LedgerError:
-            return f"{path.stem} book is unreadable"
+            return "sibling book is unreadable"
         if other.pending_client_id:
             return f"{path.stem} pending {other.pending_symbol or 'unknown'}"
     return None
@@ -1258,12 +1272,14 @@ def _sibling_positions(paths: tuple[Path, ...]) -> list[tuple[str, int]]:
         raise LedgerError("too many sibling books")
     rows: list[tuple[str, int]] = []
     for path in paths:
+        if len(path.stem) > 32:
+            raise LedgerError("sibling book name is too long")
         if not path.exists():
             continue
         try:
             other = load_book(path, 0)
         except LedgerError as exc:
-            raise LedgerError(f"{path.stem} book is unreadable") from exc
+            raise LedgerError("sibling book is unreadable") from exc
         rows.extend((pos.symbol, pos.base_atoms) for pos in other.positions)
     return rows
 
@@ -1285,6 +1301,8 @@ def _account_conflict(client: MexcClient, book: Book, sibling_paths: tuple[Path,
 
 def _exit_fees(client: MexcClient, book: Book) -> dict[str, int] | None:
     """Taker rate for each open coin. None when a rate cannot be read."""
+    if not isinstance(book.positions, list) or len(book.positions) > 8:
+        return None
     fees: dict[str, int] = {}
     for pos in book.positions:
         try:
@@ -1310,6 +1328,8 @@ def _lot_step(client: MexcClient, symbol: str) -> int | None:
 
 def _slots_used(client: MexcClient, book: Book) -> int:
     """Positions large enough to sell. An unknown lot still occupies the slot."""
+    if not isinstance(book.positions, list) or len(book.positions) > 8:
+        return 14
     used = 0
     for pos in book.positions:
         step = _lot_step(client, pos.symbol)
@@ -1325,7 +1345,7 @@ def _clock_ok(client: MexcClient) -> bool:
     except MexcRateLimit:
         raise
     except MexcError as exc:
-        LOG.warning("server time unread, live orders paused: %s", exc)
+        LOG.warning("server time unread, live orders paused: %s", _short(str(exc)))
         return False
     if clock_allows(_now_ms(), server_ms, CLOCK_SKEW_MS):
         return True
@@ -1361,6 +1381,8 @@ def open_loss_micro(
 
     With taker rates the value is the bid after the sell fee.
     """
+    if not isinstance(positions, list) or len(positions) > 8:
+        return 2**62
     loss = 0
     for pos in positions:
         price = marks.get(pos.symbol, 0)
@@ -1411,6 +1433,10 @@ def trading_day() -> str:
 def _roll_guard(book: Book) -> None:
     """Stamp morning cash before today's exits. A later loss still counts against it."""
     today = trading_day()
+    if isinstance(book.cash_micro, bool) or not isinstance(book.cash_micro, int) or book.cash_micro < 0 or book.cash_micro >= 10**24:
+        return
+    if isinstance(book.realized_micro, bool) or not isinstance(book.realized_micro, int) or book.realized_micro <= -10**24 or book.realized_micro >= 10**24:
+        return
     if book.guard_day == today:
         return
     book.guard_day = today
@@ -1426,11 +1452,15 @@ def _entries_halted(book: Book, daily_loss_bps: int, open_loss: int = 0) -> bool
         return True
     if daily_loss_bps <= 0:
         return False
+    if daily_loss_bps > 10_000:
+        return True
     drop = book.guard_realized_micro - book.realized_micro
     if drop < 0:
         drop = 0
     if open_loss < 0:
         open_loss = 0
+    if drop >= 10**24 or open_loss >= 10**24 or book.guard_cash_micro >= 10**24:
+        return True
     if book.guard_cash_micro <= 0:
         return drop + open_loss > 0
     return drop + open_loss >= book.guard_cash_micro * daily_loss_bps // 10_000
@@ -1455,6 +1485,16 @@ def _base_matches(symbol: object, base_asset: object) -> bool:
     if not usdt_symbol_ok(symbol) or not isinstance(base_asset, str) or len(base_asset) > 10:
         return False
     return base_asset == symbol[:-4]
+
+
+def _shown_name(book_name: object, path: Path) -> str:
+    """A book label on one log line. A long path name is not copied into the log."""
+    if isinstance(book_name, str) and book_name and len(book_name) <= 32:
+        return book_name
+    stem = path.stem
+    if isinstance(stem, str) and stem and len(stem) <= 32:
+        return stem
+    return "book"
 
 
 def _short(text: object) -> str:
