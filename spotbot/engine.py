@@ -1462,18 +1462,37 @@ def trading_day() -> str:
     return datetime.now(timezone.utc).date().isoformat()
 
 
+def _morning_capital(book: Book) -> int | None:
+    """Cash plus the cost of coins already on the book. Leftover cash after a buy is not the book."""
+    cash = book.cash_micro
+    if isinstance(cash, bool) or not isinstance(cash, int) or cash < 0 or cash >= 10**24:
+        return None
+    if not isinstance(book.positions, list) or len(book.positions) > 8:
+        return None
+    total = cash
+    for pos in book.positions:
+        cost = getattr(pos, "quote_micro", None)
+        if isinstance(cost, bool) or not isinstance(cost, int) or cost <= 0 or cost >= 10**24:
+            return None
+        total += cost
+        if total >= 10**24:
+            return None
+    return total
+
+
 def _roll_guard(book: Book) -> None:
-    """Stamp morning cash before today's exits. A later loss still counts against it."""
+    """Stamp morning capital before today's exits. A later loss still counts against it."""
     today = trading_day()
-    if isinstance(book.cash_micro, bool) or not isinstance(book.cash_micro, int) or book.cash_micro < 0 or book.cash_micro >= 10**24:
-        return
     if isinstance(book.realized_micro, bool) or not isinstance(book.realized_micro, int) or book.realized_micro <= -10**24 or book.realized_micro >= 10**24:
+        return
+    capital = _morning_capital(book)
+    if capital is None:
         return
     if book.guard_day == today:
         return
     book.guard_day = today
     book.guard_realized_micro = book.realized_micro
-    book.guard_cash_micro = book.cash_micro
+    book.guard_cash_micro = capital
 
 
 def _entries_halted(book: Book, daily_loss_bps: int, open_loss: int = 0) -> bool:

@@ -187,12 +187,82 @@ class MexcClient:
             raise MexcError("kline limit is too large")
         _interval_ms(interval)
         span = _interval_ms(interval)
+        return parse_klines(symbol, self._kline_raw(symbol, interval, limit, span), span)
+
+    def ohlcv_stamped(
+        self, symbol: str, interval: str = "5m", limit: int = 30
+    ) -> list[tuple[int, int, int, int, int, int]]:
+        """Open time, then open, high, low, close, and quote volume."""
+        symbol = _text_symbol(symbol)
+        if not isinstance(interval, str) or not interval:
+            raise MexcError("kline interval is not text")
+        _public_limit(limit, "kline")
+        if limit > 1_000:
+            raise MexcError("kline limit is too large")
+        span = _interval_ms(interval)
+        return _parsed_klines(symbol, self._kline_raw(symbol, interval, limit, span), span, 2)
+
+    def klines_between(self, symbol: str, interval: str, start_ms: int, end_ms: int) -> list[tuple[int, int]]:
+        """Close of each candle in [start, end), with its open time. Pages of 500."""
+        symbol = _text_symbol(symbol)
+        if not isinstance(interval, str) or not interval:
+            raise MexcError("kline interval is not text")
+        span = _interval_ms(interval)
+        if (
+            isinstance(start_ms, bool)
+            or isinstance(end_ms, bool)
+            or not isinstance(start_ms, int)
+            or not isinstance(end_ms, int)
+            or start_ms <= 0
+            or end_ms <= start_ms
+            or end_ms - start_ms > span * 6_000
+        ):
+            raise MexcError(f"kline history for {symbol} is short")
+        cursor = start_ms
+        found: list[tuple[int, int]] = []
+        for page in range(16):
+            if cursor >= end_ms:
+                break
+            if page:
+                time.sleep(0.2)
+            payload = self._public(
+                "/api/v3/klines",
+                {
+                    "symbol": symbol,
+                    "interval": interval,
+                    "limit": "500",
+                    "startTime": str(cursor),
+                    "endTime": str(end_ms),
+                },
+            )
+            batch = _timed_closes(symbol, payload, span)
+            nxt = 0
+            for opened, close in batch:
+                if opened < cursor or opened >= end_ms:
+                    continue
+                if found and opened <= found[-1][0]:
+                    continue
+                found.append((opened, close))
+                nxt = opened + span
+            if nxt <= cursor:
+                raise MexcError(f"kline history for {symbol} is short")
+            cursor = nxt
+        else:
+            if cursor < end_ms:
+                raise MexcError(f"kline history for {symbol} is short")
+        if len(found) < 2:
+            raise MexcError(f"kline history for {symbol} is short")
+        return found
+
+    def _kline_raw(self, symbol: str, interval: str, limit: int, span: int) -> list:
         if limit <= 500:
             payload = self._public(
                 "/api/v3/klines",
                 {"symbol": symbol, "interval": interval, "limit": str(limit)},
             )
-            return parse_klines(symbol, payload, span)
+            if not isinstance(payload, list):
+                raise MexcError(f"no klines for {symbol}")
+            return payload
         recent = self._public(
             "/api/v3/klines",
             {"symbol": symbol, "interval": interval, "limit": "500"},
@@ -204,7 +274,7 @@ class MexcClient:
             raise MexcError(f"kline time for {symbol} is not a timestamp")
         left = limit - len(recent)
         if left < 1:
-            return parse_klines(symbol, recent, span)
+            return recent
         start = boundary - left * span
         if start <= 0:
             raise MexcError(f"kline history for {symbol} is short")
@@ -219,7 +289,7 @@ class MexcClient:
                 "endTime": str(boundary),
             },
         )
-        return parse_klines(symbol, _join_klines(earlier, recent, symbol), span)
+        return _join_klines(earlier, recent, symbol)
 
     def depth_notional(self, symbol: str, limit: int = 20) -> tuple[int, int]:
         """Bid and ask notional in micro-USDT for the top of the book."""
@@ -828,14 +898,30 @@ def _join_klines(earlier: object, recent: object, symbol: str) -> list:
 
 def parse_klines(symbol: str, payload: object, span_ms: int | None = None) -> list[tuple[int, int, int, int, int]]:
     """Open, high, low, close, and quote volume. A broken candle is refused."""
+    full = _parsed_klines(symbol, payload, span_ms, 2)
+    return [(row[1], row[2], row[3], row[4], row[5]) for row in full]
+
+
+def _timed_closes(symbol: str, payload: object, span_ms: int) -> list[tuple[int, int]]:
+    """Open time and close. One candle is enough; the caller pages."""
+    if not isinstance(payload, list) or not payload:
+        return []
+    full = _parsed_klines(symbol, payload, span_ms, 1)
+    return [(row[0], row[4]) for row in full]
+
+
+def _parsed_klines(
+    symbol: str, payload: object, span_ms: int | None, min_rows: int
+) -> list[tuple[int, int, int, int, int, int]]:
+    """Open time, open, high, low, close, quote volume."""
     symbol = _pair_name(symbol)
     if span_ms is not None and (isinstance(span_ms, bool) or not isinstance(span_ms, int) or span_ms < 1):
         raise MexcError(f"kline interval for {symbol} is not the one requested")
-    if not isinstance(payload, list) or len(payload) < 2:
+    if not isinstance(payload, list) or len(payload) < min_rows:
         raise MexcError(f"no klines for {symbol}")
     if len(payload) > 1_000:
         raise MexcError(f"too many klines for {symbol}")
-    rows: list[tuple[int, int, int, int, int]] = []
+    rows: list[tuple[int, int, int, int, int, int]] = []
     skipped_volume = False
     previous_open = 0
     previous_close = 0
@@ -873,8 +959,8 @@ def parse_klines(symbol: str, payload: object, span_ms: int | None = None) -> li
             continue
         if min(open_px, high, low, close) <= 0 or low > high or open_px < low or open_px > high or close < low or close > high:
             raise MexcError(f"kline range for {symbol} is impossible")
-        rows.append((open_px, high, low, close, quote))
-    if len(rows) < 2:
+        rows.append((opened, open_px, high, low, close, quote))
+    if len(rows) < min_rows:
         if skipped_volume:
             raise MexcError(f"kline volume for {symbol} is zero")
         raise MexcError(f"no klines for {symbol}")

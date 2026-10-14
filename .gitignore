@@ -36,4 +36,8 @@ Thumbs.db
 # Спот-бот: локальный счёт и сборка Rust
 data/
 .venv/
+.pytest_cache/
+.hypothesis/
 native/target/
+*.csv
+bfg.jar

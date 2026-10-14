@@ -280,6 +280,7 @@ def test_stop_take_and_trail() -> None:
     assert exit_reason(100_000, 96_000, 100_000, 350, 700, 300, 200) == "stop"
     assert exit_reason(100_000, 108_000, 108_000, 350, 700, 300, 200) == "take_profit"
     assert exit_reason(100_000, 102_000, 104_000, 350, 700, 300, 200) == "trail"
+    assert exit_reason(100_000, 96_000, 104_000, 350, 700, 300, 200) == "stop"
     assert pnl_bps(100_000, 103_500) == 350
     assert exit_reason(100_000, 101_000, 101_000, 350, 700, 300, 200) is None
     try:
@@ -3259,8 +3260,17 @@ def test_a_pair_without_a_lot_does_not_stop_the_median(monkeypatch, capsys) -> N
                 return SymbolRule(symbol, False, "base step is missing", 5, 0, 1, 0, "PEPE", 1)
             return SymbolRule(symbol, True, "", 5, 1, 1, 0, "COIN", 1)
 
-        def ohlcv(self, symbol: str, interval: str, limit: int) -> list[tuple[int, int, int, int, int]]:
-            return [(1, 1, 1, 1_000_000_000_000, 1_000_000)] * limit
+        def ohlcv_stamped(self, symbol: str, interval: str, limit: int) -> list[tuple[int, int, int, int, int, int]]:
+            base = 1_700_000_000_000
+            return [(base + index * 300_000, 1, 1, 1, 1_000_000_000_000, 1_000_000) for index in range(limit)]
+
+        def klines_between(self, symbol: str, interval: str, start_ms: int, end_ms: int) -> list[tuple[int, int]]:
+            found: list[tuple[int, int]] = []
+            stamp = start_ms
+            while stamp < end_ms:
+                found.append((stamp + 240_000, 1_000_000_000_000))
+                stamp += 300_000
+            return found
 
     monkeypatch.setattr("spotbot.replay_main.MexcClient", _Client)
     monkeypatch.setattr("spotbot.replay_main.time.sleep", lambda _sec: None)
@@ -3441,6 +3451,108 @@ def test_a_jumped_close_stays_in_the_tape_and_stops() -> None:
     )
     assert result.trades == 1
     assert result.fills[0].exit_micro * 10_000 < result.fills[0].entry_micro * 9_000
+
+
+def test_a_next_open_that_jumped_from_the_close_is_not_bought() -> None:
+    from spotbot.replay import replay_closes
+
+    closes = [100_000_000] * 40 + [90_000_000, 100_000_000, 90_000_000]
+    near = replay_closes(
+        closes,
+        cash_micro=1_000_000_000,
+        alloc_bps=10_000,
+        taker_bps=5,
+        rsi_buy=100,
+        stop_bps=350,
+        take_bps=700,
+        trail_arm_bps=10_000,
+        trail_gap_bps=10_000,
+        min_notional_micro=1,
+        opens=[100_000_000] * 40 + [90_000_000, 100_000_000, 100_000_000],
+    )
+    jumped = replay_closes(
+        closes,
+        cash_micro=1_000_000_000,
+        alloc_bps=10_000,
+        taker_bps=5,
+        rsi_buy=100,
+        stop_bps=350,
+        take_bps=700,
+        trail_arm_bps=10_000,
+        trail_gap_bps=10_000,
+        min_notional_micro=1,
+        opens=[100_000_000] * 40 + [90_000_000, 100_000_000, 120_000_000],
+    )
+    assert near.trades >= 1
+    assert jumped.trades == 0
+
+
+def test_each_sleeve_keeps_its_own_replay_median() -> None:
+    from spotbot.replay_main import _sleeve_values
+
+    grouped = dict(
+        _sleeve_values(
+            [
+                ("BTCUSDT", -8),
+                ("ETHUSDT", -9),
+                ("SOLUSDT", -10),
+                ("DOGEUSDT", -18),
+                ("PEPEUSDT", -1),
+            ]
+        )
+    )
+    assert grouped["major"] == [-8, -9]
+    assert grouped["alt"] == [-10]
+    assert grouped["meme"] == [-18, -1]
+    assert "XRPUSDT" not in grouped
+
+
+def test_the_stop_sells_the_first_minute_that_hits_it() -> None:
+    from spotbot.replay import replay_closes
+
+    closes = [100_000_000] * 40 + [90_000_000, 98_000_000, 97_000_000] + [93_000_000] * 6
+    plain = replay_closes(
+        closes,
+        cash_micro=1_000_000_000,
+        alloc_bps=10_000,
+        taker_bps=5,
+        rsi_buy=100,
+        stop_bps=350,
+        take_bps=700,
+        trail_arm_bps=10_000,
+        trail_gap_bps=10_000,
+        min_notional_micro=1,
+    )
+    assert plain.trades >= 1 and plain.fills
+    opened = 1_700_000_000_000
+    times = [opened + index * 300_000 for index in range(len(closes))]
+    entry = plain.fills[0].entry_micro
+    mild = entry * 9_640 // 10_000
+    minutes: list[tuple[int, int]] = []
+    for index, close in enumerate(closes):
+        stamp = times[index]
+        if close == 93_000_000:
+            minutes.append((stamp, mild))
+            minutes.append((stamp + 60_000, close))
+        else:
+            minutes.append((stamp + 240_000, close))
+    watched = replay_closes(
+        closes,
+        cash_micro=1_000_000_000,
+        alloc_bps=10_000,
+        taker_bps=5,
+        rsi_buy=100,
+        stop_bps=350,
+        take_bps=700,
+        trail_arm_bps=10_000,
+        trail_gap_bps=10_000,
+        min_notional_micro=1,
+        minute_closes=minutes,
+        bar_open_ms=times,
+    )
+    assert watched.trades >= 1 and watched.fills
+    assert watched.fills[0].exit_micro > plain.fills[0].exit_micro
+    assert watched.net_micro < 0
 
 
 def test_replay_stop_is_negative_after_fees() -> None:
@@ -4545,6 +4657,22 @@ def test_daily_loss_stops_new_entries() -> None:
         guard_cash_micro=0,
     )
     assert _entries_halted(flat, 500) is True
+    from spotbot.state import Position
+
+    held = Book(
+        cash_micro=1,
+        positions=[Position("BTCUSDT", 100, 100, 100_000_000, 1, "rsi+reclaim")],
+        realized_micro=0,
+        guard_day="2000-01-01",
+        guard_realized_micro=0,
+        guard_cash_micro=1,
+    )
+    _roll_guard(held)
+    assert held.guard_cash_micro == 100_000_001
+    held.realized_micro = -1_000_000
+    assert _entries_halted(held, 500) is False
+    held.realized_micro = -5_000_001
+    assert _entries_halted(held, 500) is True
     flat.realized_micro = 5_000_000
     assert _entries_halted(flat, 500) is False
 

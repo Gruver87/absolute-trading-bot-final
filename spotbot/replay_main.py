@@ -31,10 +31,10 @@ def main(argv: list[str] | None = None) -> int:
         print("limit must be 80..1000", file=sys.stderr)
         return 2
     symbols = list(sleeve_symbols()) if args.sleeves else [args.symbol.upper()]
-    later_rsi: list[int] = []
-    later_lift: list[int] = []
-    earlier_rsi: list[int] = []
-    earlier_lift: list[int] = []
+    later_rsi: list[tuple[str, int]] = []
+    later_lift: list[tuple[str, int]] = []
+    earlier_rsi: list[tuple[str, int]] = []
+    earlier_lift: list[tuple[str, int]] = []
     zero_fee: list[str] = []
     left_out: list[str] = []
     client = MexcClient()
@@ -51,7 +51,12 @@ def main(argv: list[str] | None = None) -> int:
                 left_out.append(symbol)
                 print(f"{symbol}: {reason}; left out of the median")
                 continue
-            rows = client.ohlcv(symbol, "5m", args.limit)
+            stamped = client.ohlcv_stamped(symbol, "5m", args.limit)
+            if len(stamped) >= 2:
+                stamped = stamped[:-1]
+            if len(stamped) < 2:
+                raise MexcError(f"no klines for {symbol}")
+            minutes = client.klines_between(symbol, "1m", stamped[0][0], stamped[-1][0] + 300_000)
         except MexcRateLimit as exc:
             print(f"replay stopped on rate limit: {exc}", file=sys.stderr)
             print("median refused: the tape is incomplete")
@@ -63,11 +68,11 @@ def main(argv: list[str] | None = None) -> int:
             left_out.append(symbol)
             print(f"{symbol}: {exc}; left out of the median")
             continue
-        if len(rows) >= 2:
-            rows = rows[:-1]
-        opens = [row[0] for row in rows]
-        closes = [row[3] for row in rows]
-        bars = [(row[1], row[2], row[3], row[4]) for row in rows]
+        open_ms = [row[0] for row in stamped]
+        opens = [row[1] for row in stamped]
+        closes = [row[4] for row in stamped]
+        bars = [(row[2], row[3], row[4], row[5]) for row in stamped]
+        rows = stamped
         step = rule.base_step_atoms
         taker = rule.taker_bps
         if taker == 0:
@@ -77,7 +82,17 @@ def main(argv: list[str] | None = None) -> int:
         if len(rows) >= 160:
             cut = holdout_cut(len(rows))
             e_rsi, e_lift = _run_pair(
-                "earlier", symbol, closes[:cut], bars[:cut], step, rule.price_tick, taker, median=keep, opens=opens[:cut]
+                "earlier",
+                symbol,
+                closes[:cut],
+                bars[:cut],
+                step,
+                rule.price_tick,
+                taker,
+                median=keep,
+                opens=opens[:cut],
+                minute_closes=minutes,
+                bar_open_ms=open_ms[:cut],
             )
             rsi_net, lift_net = _run_pair(
                 "later",
@@ -90,22 +105,40 @@ def main(argv: list[str] | None = None) -> int:
                 median=keep,
                 entry_from=cut,
                 opens=opens,
+                minute_closes=minutes,
+                bar_open_ms=open_ms,
             )
             if e_rsi is not None:
-                earlier_rsi.append(e_rsi)
+                earlier_rsi.append((symbol, e_rsi))
             if e_lift is not None:
-                earlier_lift.append(e_lift)
+                earlier_lift.append((symbol, e_lift))
             if rsi_net is not None:
-                later_rsi.append(rsi_net)
+                later_rsi.append((symbol, rsi_net))
             if lift_net is not None:
-                later_lift.append(lift_net)
+                later_lift.append((symbol, lift_net))
         else:
-            _run_pair("full", symbol, closes, bars, step, rule.price_tick, taker, median=False, opens=opens)
+            _run_pair(
+                "full",
+                symbol,
+                closes,
+                bars,
+                step,
+                rule.price_tick,
+                taker,
+                median=False,
+                opens=opens,
+                minute_closes=minutes,
+                bar_open_ms=open_ms,
+            )
     if args.sleeves:
-        _print_median("earlier rsi", earlier_rsi)
-        _print_median("earlier lift-candles", earlier_lift)
-        _print_median("later rsi", later_rsi)
-        _print_median("later lift-candles", later_lift)
+        _print_median("earlier rsi", [net for _symbol, net in earlier_rsi])
+        _print_sleeve_medians("earlier rsi", earlier_rsi)
+        _print_median("earlier lift-candles", [net for _symbol, net in earlier_lift])
+        _print_sleeve_medians("earlier lift-candles", earlier_lift)
+        _print_median("later rsi", [net for _symbol, net in later_rsi])
+        _print_sleeve_medians("later rsi", later_rsi)
+        _print_median("later lift-candles", [net for _symbol, net in later_lift])
+        _print_sleeve_medians("later lift-candles", later_lift)
         if zero_fee:
             print("zero taker left out: " + ",".join(zero_fee))
         if left_out:
@@ -129,6 +162,8 @@ def _run_pair(
     median: bool,
     entry_from: int = 0,
     opens: list[int] | None = None,
+    minute_closes: list[tuple[int, int]] | None = None,
+    bar_open_ms: list[int] | None = None,
 ) -> tuple[int | None, int | None]:
     cash = parse_micro("1000")
     floor = parse_micro("3")
@@ -155,11 +190,15 @@ def _run_pair(
         lookback_bars=288,
         lock_bars=48,
         lock_count=3,
+        minute_closes=minute_closes,
+        bar_open_ms=bar_open_ms,
         )
         _print_result(f"rsi:{label}", symbol, len(traded), result, taker_bps)
         _print_hold(label, symbol, traded, result, taker_bps, base_step_atoms, floor)
         if median:
             rsi_net = _account(result)
+            if rsi_net is None:
+                print(f"rsi:{label} symbol={symbol} left out: the minute tape does not cover the bar")
     else:
         print(f"rsi:{label} symbol={symbol} refused: price step is wider than the 350 bps stop")
     lift_net: int | None = None
@@ -178,10 +217,14 @@ def _run_pair(
         lookback_bars=288,
         lock_bars=48,
         lock_count=3,
+        minute_closes=minute_closes,
+        bar_open_ms=bar_open_ms,
         )
         _print_result(f"lift-candles:{label}", symbol, len(traded_bars), lift, taker_bps)
         if median:
             lift_net = _account(lift)
+            if lift_net is None:
+                print(f"lift-candles:{label} symbol={symbol} left out: the minute tape does not cover the bar")
     else:
         print(f"lift-candles:{label} symbol={symbol} refused: price step is wider than the 150 bps stop")
     return rsi_net, lift_net
@@ -256,6 +299,22 @@ def _print_hold(
         f"hold:{label} symbol={symbol} net={format_usdt(held)} "
         f"rule_minus_hold={format_usdt(result.net_micro - held)}"
     )
+
+
+def _sleeve_values(rows: list[tuple[str, int]]) -> list[tuple[str, list[int]]]:
+    """Pair results kept on the sleeve that would have traded them. One rule, three books."""
+    from spotbot.sleeves import SLEEVES
+
+    grouped: list[tuple[str, list[int]]] = []
+    for sleeve in SLEEVES:
+        names = set(sleeve.symbols)
+        grouped.append((sleeve.name, [net for symbol, net in rows if symbol in names]))
+    return grouped
+
+
+def _print_sleeve_medians(label: str, rows: list[tuple[str, int]]) -> None:
+    for name, values in _sleeve_values(rows):
+        _print_median(f"{label} {name}", values)
 
 
 def _print_median(label: str, values: list[int]) -> None:

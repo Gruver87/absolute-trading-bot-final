@@ -1,7 +1,7 @@
-"""RSI, MACD cross, and Bollinger from the earlier strategies module.
+"""RSI, MACD, and Bollinger.
 
-The old spot loop entered on RSI < 35 only. MACD and Bollinger were written
-and never called. Entry here requires RSI plus one of those two confirmations.
+Entry is a band reclaim after a prior oversold bar. A fresh MACD sell cross
+blocks the buy. A MACD buy by itself does not enter.
 """
 
 from __future__ import annotations

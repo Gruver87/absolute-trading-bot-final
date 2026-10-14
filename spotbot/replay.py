@@ -12,7 +12,7 @@ from spotbot.fees import paper_sell
 from spotbot.liquidity import candle_lift
 from spotbot.money import notional_micro
 from spotbot.rules import budget_micro, plan_paper_buy
-from spotbot.sanity import mark_ok, price_ok, slip_price
+from spotbot.sanity import follows_close, mark_ok, price_ok, slip_price
 from spotbot.mexc import KLINE_LIMIT
 from spotbot.signals import entry_signal, reclaim_still
 
@@ -68,6 +68,8 @@ def replay_closes(
     lookback_bars: int = 0,
     lock_bars: int = 0,
     lock_count: int = 3,
+    minute_closes: list[tuple[int, int]] | None = None,
+    bar_open_ms: list[int] | None = None,
 ) -> ReplayResult:
     if (
         not closes
@@ -83,10 +85,13 @@ def replay_closes(
         or not isinstance(lock_count, int)
         or lock_count < 2
         or (opens is not None and (not isinstance(opens, list) or len(opens) != len(closes)))
+        or (minute_closes is None) != (bar_open_ms is None)
+        or (bar_open_ms is not None and (not isinstance(bar_open_ms, list) or len(bar_open_ms) != len(closes)))
     ):
         return ReplayResult(0, 0, 0, 0, False, ())
     clean: list[int] = []
     clean_opens: list[int] | None = [] if opens is not None else None
+    clean_times: list[int] = []
     for index, price in enumerate(closes):
         if not _usable(price):
             continue
@@ -95,10 +100,15 @@ def replay_closes(
         clean.append(price)
         if clean_opens is not None and opens is not None:
             clean_opens.append(opens[index])
+        if bar_open_ms is not None:
+            clean_times.append(bar_open_ms[index])
     if not clean:
         return ReplayResult(0, 0, 0, 0, False, ())
     closes = clean
     opens = clean_opens
+    buckets = _minute_buckets(minute_closes, clean_times) if minute_closes is not None else None
+    if minute_closes is not None and (buckets is None or len(buckets) != len(closes) or any(not bucket for bucket in buckets)):
+        return ReplayResult(0, 0, 0, 0, True, (), open_known=False)
     cash = cash_micro
     net = 0
     fees = 0
@@ -127,6 +137,9 @@ def replay_closes(
             if fill is not None and fill > 0 and not reclaim_still(window, fill):
                 i += 1
                 continue
+            if fill is not None and fill > 0 and not follows_close(closes[i], fill):
+                i += 1
+                continue
             paid = slip_price(fill or 0, slip_bps, True)
             if paid <= 0:
                 break
@@ -145,17 +158,13 @@ def replay_closes(
             spent = debit
             i += 1
             continue
-        price = slip_price(closes[i], slip_bps, False)
-        if price <= 0 or not mark_ok(peak, price):
-            i += 1
-            continue
-        if price > peak:
-            peak = price
-        reason = exit_reason(entry, price, peak, stop_bps, take_bps, trail_arm_bps, trail_gap_bps)
+        raws = buckets[i] if buckets is not None else [closes[i]]
+        reason, sold, peak = _walk_exit(
+            entry, peak, raws, slip_bps, stop_bps, take_bps, trail_arm_bps, trail_gap_bps
+        )
         if reason is None:
             i += 1
             continue
-        sold = price
         credit, fee = paper_sell(base, sold, taker_bps)
         gross = notional_micro(base, sold)
         if credit <= 0 or fee < 0 or credit + fee != gross:
@@ -176,7 +185,8 @@ def replay_closes(
         base = 0
         spent = 0
         i += 1
-    mark, known = _open_mark(entry, peak, base, spent, closes[-1] if closes else 0, taker_bps, slip_bps)
+    last = buckets[-1][-1] if buckets else (closes[-1] if closes else 0)
+    mark, known = _open_mark(entry, peak, base, spent, last, taker_bps, slip_bps)
     return ReplayResult(
         trades, wins, net, fees, ended_open=entry != 0, fills=tuple(fills), open_micro=mark, open_known=known
     )
@@ -201,6 +211,8 @@ def replay_lift_bars(
     lookback_bars: int = 0,
     lock_bars: int = 0,
     lock_count: int = 3,
+    minute_closes: list[tuple[int, int]] | None = None,
+    bar_open_ms: list[int] | None = None,
 ) -> ReplayResult:
     """Candle half of the liquidity rule. Bid/ask and the oracle are not in the tape.
 
@@ -220,10 +232,13 @@ def replay_lift_bars(
         or not isinstance(lock_count, int)
         or lock_count < 2
         or (opens is not None and (not isinstance(opens, list) or len(opens) != len(bars)))
+        or (minute_closes is None) != (bar_open_ms is None)
+        or (bar_open_ms is not None and (not isinstance(bar_open_ms, list) or len(bar_open_ms) != len(bars)))
     ):
         return ReplayResult(0, 0, 0, 0, False, ())
     clean: list[tuple[int, int, int, int]] = []
     clean_opens: list[int] | None = [] if opens is not None else None
+    clean_times: list[int] = []
     for index, bar in enumerate(bars):
         if bar[2] <= 0:
             continue
@@ -232,10 +247,15 @@ def replay_lift_bars(
         clean.append(bar)
         if clean_opens is not None and opens is not None:
             clean_opens.append(opens[index])
+        if bar_open_ms is not None:
+            clean_times.append(bar_open_ms[index])
     if not clean:
         return ReplayResult(0, 0, 0, 0, False, ())
     bars = clean
     opens = clean_opens
+    buckets = _minute_buckets(minute_closes, clean_times) if minute_closes is not None else None
+    if minute_closes is not None and (buckets is None or len(buckets) != len(bars) or any(not bucket for bucket in buckets)):
+        return ReplayResult(0, 0, 0, 0, True, (), open_known=False)
     cash = cash_micro
     net = 0
     fees = 0
@@ -262,6 +282,9 @@ def replay_lift_bars(
                 i += 1
                 continue
             fill = _fill_price(opens, [bar[2] for bar in bars], i)
+            if fill is not None and fill > 0 and not follows_close(bars[i][2], fill):
+                i += 1
+                continue
             paid = slip_price(fill or 0, slip_bps, True)
             if paid <= 0:
                 break
@@ -280,17 +303,13 @@ def replay_lift_bars(
             spent = debit
             i += 1
             continue
-        close = slip_price(bars[i][2], slip_bps, False)
-        if close <= 0 or not mark_ok(peak, close):
-            i += 1
-            continue
-        if close > peak:
-            peak = close
-        reason = exit_reason(entry, close, peak, stop_bps, take_bps, trail_arm_bps, trail_gap_bps)
+        raws = buckets[i] if buckets is not None else [bars[i][2]]
+        reason, sold, peak = _walk_exit(
+            entry, peak, raws, slip_bps, stop_bps, take_bps, trail_arm_bps, trail_gap_bps
+        )
         if reason is None:
             i += 1
             continue
-        sold = close
         credit, fee = paper_sell(base, sold, taker_bps)
         gross = notional_micro(base, sold)
         if credit <= 0 or fee < 0 or credit + fee != gross:
@@ -311,11 +330,70 @@ def replay_lift_bars(
         base = 0
         spent = 0
         i += 1
-    last = bars[-1][2] if bars else 0
+    last = buckets[-1][-1] if buckets else (bars[-1][2] if bars else 0)
     mark, known = _open_mark(entry, peak, base, spent, last, taker_bps, slip_bps)
     return ReplayResult(
         trades, wins, net, fees, ended_open=entry != 0, fills=tuple(fills), open_micro=mark, open_known=known
     )
+
+
+def _minute_buckets(marks: object, opens_ms: list[int], span: int = 300_000) -> list[list[int]] | None:
+    """Minute closes that opened inside each 5-minute bar, in time order."""
+    if not isinstance(marks, list) or not opens_ms or isinstance(span, bool) or not isinstance(span, int) or span < 1:
+        return None
+    parsed: list[tuple[int, int]] = []
+    previous = 0
+    for item in marks:
+        if not isinstance(item, tuple) or len(item) != 2:
+            return None
+        stamp, price = item
+        if isinstance(stamp, bool) or isinstance(price, bool) or not isinstance(stamp, int) or not isinstance(price, int):
+            return None
+        if stamp <= previous or price <= 0 or price >= 10**24 or stamp >= 10**15:
+            return None
+        previous = stamp
+        parsed.append((stamp, price))
+    buckets: list[list[int]] = [[] for _ in opens_ms]
+    cursor = 0
+    for index, opened in enumerate(opens_ms):
+        if isinstance(opened, bool) or not isinstance(opened, int) or opened <= 0:
+            return None
+        end = opened + span
+        while cursor < len(parsed) and parsed[cursor][0] < opened:
+            cursor += 1
+        scan = cursor
+        while scan < len(parsed) and parsed[scan][0] < end:
+            buckets[index].append(parsed[scan][1])
+            scan += 1
+    return buckets
+
+
+def _walk_exit(
+    entry: int,
+    peak: int,
+    raws: list[int],
+    slip_bps: int,
+    stop_bps: int,
+    take_bps: int,
+    trail_arm_bps: int,
+    trail_gap_bps: int,
+) -> tuple[str | None, int, int]:
+    """First observed price that already exits. The theoretical stop is not a fill."""
+    for raw in raws:
+        if not _usable(raw):
+            continue
+        price = slip_price(raw, slip_bps, False)
+        if price <= 0 or not mark_ok(peak, price):
+            continue
+        if price > peak:
+            peak = price
+        try:
+            reason = exit_reason(entry, price, peak, stop_bps, take_bps, trail_arm_bps, trail_gap_bps)
+        except ValueError:
+            continue
+        if reason is not None:
+            return reason, price, peak
+    return None, 0, peak
 
 
 def _entry_jump(closes: list[int], index: int) -> bool:
