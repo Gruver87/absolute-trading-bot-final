@@ -3034,6 +3034,48 @@ def test_a_wide_treasury_is_not_a_split(tmp_path) -> None:
     assert [row.get("kind") for row in rows] == ["ok"]
 
 
+def test_a_huge_log_does_not_start(tmp_path) -> None:
+    from spotbot.__main__ import _log_refused
+    from spotbot.engine import _log_oracle
+    from spotbot.money import decimal_text, to_satoshi
+    from spotbot.ops_http import OpsError, _status_bytes, snapshot
+    from spotbot.signals import entry_signal, macd_cross
+
+    weird = type("Q" * 40, (), {})()
+    try:
+        decimal_text(weird)
+        raise AssertionError("kind")
+    except MoneyError as exc:
+        assert "Q" * 40 not in str(exc)
+    try:
+        to_satoshi("12.3.4")
+        raise AssertionError("decimal")
+    except MoneyError as exc:
+        assert "12.3.4" not in str(exc)
+    assert entry_signal("BTCUSDT", [100] * 30, 101) is not None
+    assert entry_signal("REPLAY", [100] * 30, 101) is not None
+    assert entry_signal("BTCUSDT", [100] * 30, 501) is None
+    assert macd_cross([100] * 40, 20, 10, 9) is None
+    _log_oracle("A" * 40, 100, {"binance": 100}, tmp_path)
+    _log_oracle("BTCUSDT", 100, {str(i): 100 for i in range(9)}, tmp_path)
+    assert not (tmp_path / "ops_quotes.json").exists()
+    folder = tmp_path / "ops.log"
+    folder.mkdir()
+    assert _log_refused(folder) is True
+    small = tmp_path / "small.log"
+    small.write_bytes(b"x" * 11)
+    assert _log_refused(small) is False
+    assert _log_refused(small, 10) is True
+    planted = tmp_path / "notdir"
+    planted.write_text("x", encoding="utf-8")
+    assert snapshot(planted)["books"] == {"error": "data dir is not a directory"}
+    try:
+        _status_bytes(tmp_path, 19280, 10)
+        raise AssertionError("status size")
+    except OpsError as exc:
+        assert "unreadable" in str(exc)
+
+
 def test_lift_needs_volume_and_bids() -> None:
     volumes = [100] * 12 + [400, 100]
     assert volume_ratio_bps(volumes) == 40_000

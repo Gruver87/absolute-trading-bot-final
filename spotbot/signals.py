@@ -55,6 +55,8 @@ def macd_cross(prices: list[int], fast: int = 12, slow: int = 26, signal: int = 
     """Return buy/sell on a fresh MACD cross, else None."""
     if not isinstance(prices, list) or not all(_whole(item) and 1 <= item <= 500 for item in (fast, slow, signal)):
         return None
+    if fast >= slow:
+        return None
     if len(prices) < slow + signal + 1:
         return None
     if not all(_whole(price) and 0 < price < 10**24 for price in prices):
@@ -115,7 +117,9 @@ def entry_signal(symbol: str, prices: list[int], rsi_buy: int) -> Entry | None:
     """BUY only on oversold RSI confirmed by Bollinger or a MACD buy cross."""
     if not isinstance(symbol, str) or len(symbol) > 32 or not isinstance(prices, list):
         return None
-    if isinstance(rsi_buy, bool) or not isinstance(rsi_buy, int) or any(isinstance(price, bool) or not isinstance(price, int) or price <= 0 or price >= 10**24 for price in prices):
+    if isinstance(rsi_buy, bool) or not isinstance(rsi_buy, int) or rsi_buy < 1 or rsi_buy > 500:
+        return None
+    if any(isinstance(price, bool) or not isinstance(price, int) or price <= 0 or price >= 10**24 for price in prices):
         return None
     value = rsi(prices)
     if value is None or value >= rsi_buy:

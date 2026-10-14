@@ -43,6 +43,16 @@ def check_ops_port(port: int) -> None:
 
 def snapshot(data_dir: Path, port: int = DEFAULT_PORT) -> dict[str, object]:
     """Public view of books, quotes, events, and the bot log."""
+    if not isinstance(data_dir, Path) or not data_dir.is_dir():
+        return {
+            "bind": f"127.0.0.1:{port}",
+            "mesh_ports": "18180-18182",
+            "books": {"error": "data dir is not a directory"},
+            "quotes": {},
+            "events": [],
+            "log": [],
+            "heartbeat": None,
+        }
     books: dict[str, object] = {}
     names = ("sleeve_major", "sleeve_alt", "sleeve_meme", "book", "book_liquidity", "treasury")
     for folder in ("", "paper", "live"):
@@ -76,6 +86,17 @@ def snapshot(data_dir: Path, port: int = DEFAULT_PORT) -> dict[str, object]:
     }
 
 
+def _status_bytes(data_dir: Path, port: int, limit: int = 1_000_000) -> bytes:
+    """The status page stays under a megabyte. A larger body is not sent."""
+    try:
+        body = json.dumps(snapshot(data_dir, port), ensure_ascii=False).encode("utf-8")
+    except (OSError, UnicodeError, ValueError, TypeError, RecursionError, MemoryError) as exc:
+        raise OpsError("status unreadable") from exc
+    if len(body) > limit:
+        raise OpsError("status unreadable")
+    return body
+
+
 def _ops_path(raw: object) -> str | None:
     """The page path only. A long query is not read as a route."""
     if not isinstance(raw, str) or len(raw) > 256:
@@ -101,7 +122,11 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/api/status":
             data_dir = self.server.data_dir  # type: ignore[attr-defined]
             port = int(self.server.server_address[1])
-            body = json.dumps(snapshot(data_dir, port), ensure_ascii=False).encode("utf-8")
+            try:
+                body = _status_bytes(data_dir, port)
+            except OpsError:
+                self._send(500, "text/plain; charset=utf-8", b"status unreadable")
+                return
             self._send(200, "application/json; charset=utf-8", body)
             return
         if path in ("/", "/index.html"):

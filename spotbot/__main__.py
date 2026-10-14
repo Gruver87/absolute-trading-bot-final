@@ -41,6 +41,16 @@ def _log_line(exc: BaseException) -> str:
     return text if len(text) <= 180 else text[:180]
 
 
+def _log_refused(path: Path, limit: int = 8_000_000) -> bool:
+    """A directory or a grown log is not opened. A missing log is the normal start."""
+    if not path.exists():
+        return False
+    try:
+        return (not path.is_file()) or path.stat().st_size > limit
+    except OSError:
+        return True
+
+
 def main(argv: list[str] | None = None) -> int:
     given = list(sys.argv[1:] if argv is None else argv)
     if len(given) > 16 or any(not isinstance(item, str) or len(item) > 32 for item in given):
@@ -72,7 +82,11 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     data_dir = root / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
-    file_log = logging.FileHandler(data_dir / "ops.log", encoding="utf-8")
+    log_path = data_dir / "ops.log"
+    if _log_refused(log_path):
+        logging.error("ops log is too large")
+        return 2
+    file_log = logging.FileHandler(log_path, encoding="utf-8")
     file_log.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
     logging.getLogger().addHandler(file_log)
     try:

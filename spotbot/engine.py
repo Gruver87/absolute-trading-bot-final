@@ -1525,6 +1525,8 @@ def _shown_usdt(micro: object) -> str:
 
 
 def _log_oracle(symbol: str, mexc_micro: int, quotes: dict[str, int], data_dir: Path | None = None) -> None:
+    if not isinstance(symbol, str) or len(symbol) > 32 or not isinstance(quotes, dict) or len(quotes) > 8:
+        return
     peers = list(quotes.values())
     lag = lag_bps(mexc_micro, peers)
     width = deviation_bps([mexc_micro, *peers])

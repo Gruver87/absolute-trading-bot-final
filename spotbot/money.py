@@ -43,7 +43,7 @@ def decimal_text(raw: object) -> str:
             raise MoneyError("amount is too long")
         return text
     if not isinstance(raw, str):
-        raise MoneyError(f"amount must be a decimal string, got {type(raw).__name__}")
+        raise MoneyError("amount must be a decimal string")
     return _plain_decimal(raw)
 
 
@@ -65,12 +65,12 @@ def to_satoshi(amount: object) -> int:
     if isinstance(amount, int):
         return _bounded(amount)
     if not isinstance(amount, str):
-        raise MoneyError(f"amount must be a decimal string, got {type(amount).__name__}")
+        raise MoneyError("amount must be a decimal string")
     raw = _plain_decimal(amount)
     try:
         value = Decimal(raw)
     except (InvalidOperation, ValueError) as exc:
-        raise MoneyError(f"not a decimal: {amount}") from exc
+        raise MoneyError("not a decimal") from exc
     if not value.is_finite():
         raise MoneyError("amount must be finite")
     scaled = (value * Decimal(SATOSHI_MULTIPLIER)).to_integral_value(rounding=ROUND_DOWN)
