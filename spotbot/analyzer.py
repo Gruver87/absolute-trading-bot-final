@@ -16,6 +16,14 @@ _LIB: ctypes.CDLL | None = None
 _LOOKED = False
 
 
+def _native_file(path: Path, limit: int = 8_000_000) -> bool:
+    """A small real file. A directory or a planted huge file is not a library."""
+    try:
+        return path.is_file() and 0 < path.stat().st_size <= limit
+    except OSError:
+        return False
+
+
 def _load() -> ctypes.CDLL | None:
     global _LIB, _LOOKED
     if _LOOKED:
@@ -27,18 +35,21 @@ def _load() -> ctypes.CDLL | None:
         root / "native" / "target" / "debug" / "spotbot_native.dll",
     ]
     for path in candidates:
-        if not path.exists():
+        if not _native_file(path):
             continue
-        lib = ctypes.CDLL(str(path))
-        lib.sb_score.argtypes = [
-            ctypes.c_int32,
-            ctypes.c_int32,
-            ctypes.c_int32,
-            ctypes.c_int32,
-            ctypes.c_int64,
-            ctypes.c_int64,
-        ]
-        lib.sb_score.restype = ctypes.c_int32
+        try:
+            lib = ctypes.CDLL(str(path))
+            lib.sb_score.argtypes = [
+                ctypes.c_int32,
+                ctypes.c_int32,
+                ctypes.c_int32,
+                ctypes.c_int32,
+                ctypes.c_int64,
+                ctypes.c_int64,
+            ]
+            lib.sb_score.restype = ctypes.c_int32
+        except (OSError, AttributeError):
+            continue
         _LIB = lib
         LOG.info("analyzer backend=rust %s", path.name)
         return lib

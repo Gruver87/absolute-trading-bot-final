@@ -31,6 +31,9 @@ from dataclasses import dataclass
 from spotbot.reconcile import order_is_ours
 from spotbot.rules import SymbolRule, parse_symbol_rule
 
+# The RSI cycle asks for this many candles. The last one is still open.
+KLINE_LIMIT = 80
+
 BASE = "https://api.mexc.com"
 
 
@@ -74,6 +77,8 @@ def backoff_sec(retry_after_sec: int | None, interval_sec: int) -> int:
     """
     if isinstance(interval_sec, bool) or not isinstance(interval_sec, int) or interval_sec < 1:
         raise MexcError("backoff interval must be an integer >= 1")
+    if interval_sec > 86_400:
+        interval_sec = 86_400
     stated = retry_after_sec
     if stated is None or isinstance(stated, bool) or not isinstance(stated, int) or stated < 1:
         stated = _MIN_UNKNOWN_BACKOFF_SEC
@@ -167,9 +172,10 @@ class MexcClient:
         """Drop cached exchangeInfo so a later cycle sees a new fee or a halted pair."""
         self._rules.clear()
 
-    def klines(self, symbol: str, interval: str = "5m", limit: int = 80) -> list[int]:
+    def klines(self, symbol: str, interval: str = "5m", limit: int = KLINE_LIMIT) -> list[int]:
+        """Close of each candle. Quote volume is not a price."""
         _public_limit(limit, "kline")
-        return [row[4] for row in self.ohlcv(symbol, interval, limit)]
+        return [row[3] for row in self.ohlcv(symbol, interval, limit)]
 
     def ohlcv(self, symbol: str, interval: str = "5m", limit: int = 30) -> list[tuple[int, int, int, int, int]]:
         """Rows of open, high, low, close, quote-volume, all in micro-USDT."""
@@ -180,12 +186,40 @@ class MexcClient:
         if limit > 1_000:
             raise MexcError("kline limit is too large")
         _interval_ms(interval)
-        payload = self._public(
-            "/api/v3/klines",
-            {"symbol": symbol, "interval": interval, "limit": str(limit)},
-        )
         span = _interval_ms(interval)
-        return parse_klines(symbol, payload, span)
+        if limit <= 500:
+            payload = self._public(
+                "/api/v3/klines",
+                {"symbol": symbol, "interval": interval, "limit": str(limit)},
+            )
+            return parse_klines(symbol, payload, span)
+        recent = self._public(
+            "/api/v3/klines",
+            {"symbol": symbol, "interval": interval, "limit": "500"},
+        )
+        if not isinstance(recent, list) or not recent or not isinstance(recent[0], list):
+            raise MexcError(f"no klines for {symbol}")
+        boundary = recent[0][0]
+        if isinstance(boundary, bool) or not isinstance(boundary, int) or boundary <= 0:
+            raise MexcError(f"kline time for {symbol} is not a timestamp")
+        left = limit - len(recent)
+        if left < 1:
+            return parse_klines(symbol, recent, span)
+        start = boundary - left * span
+        if start <= 0:
+            raise MexcError(f"kline history for {symbol} is short")
+        time.sleep(0.2)
+        earlier = self._public(
+            "/api/v3/klines",
+            {
+                "symbol": symbol,
+                "interval": interval,
+                "limit": str(left),
+                "startTime": str(start),
+                "endTime": str(boundary),
+            },
+        )
+        return parse_klines(symbol, _join_klines(earlier, recent, symbol), span)
 
     def depth_notional(self, symbol: str, limit: int = 20) -> tuple[int, int]:
         """Bid and ask notional in micro-USDT for the top of the book."""
@@ -449,6 +483,9 @@ def signed_payload(body: object, as_list: bool) -> Any:
     if isinstance(body, dict):
         if len(body) > 128:
             raise MexcError("order response is too wide")
+        fills = body.get("fills")
+        if isinstance(fills, list) and len(fills) > 128:
+            raise MexcError("order fills are too many")
         _reject_exchange_code(body)
         if as_list:
             raise MexcError("order response is not a list")
@@ -456,6 +493,11 @@ def signed_payload(body: object, as_list: bool) -> Any:
     if as_list and isinstance(body, list):
         if len(body) > 5_000:
             raise MexcError("order response is too large")
+        for row in body:
+            if not isinstance(row, dict):
+                raise MexcError("trade row is not an object")
+            if len(row) > 32:
+                raise MexcError("trade row is too wide")
         return body
     raise MexcError("order response is not an object")
 
@@ -539,8 +581,24 @@ def ticker_price(payload: object, symbol: str) -> int:
         raise MexcError(f"bad price for {symbol}") from exc
 
 
+def _near_book(levels: list[tuple[int, int]], best: int) -> int:
+    """Notional within 30 bps of the touch. A further order is not the next trade."""
+    from spotbot.oracle import MAX_WIDTH_BPS
+
+    total = 0
+    for price, notional in levels:
+        if price <= 0 or best <= 0:
+            continue
+        if abs(price - best) * 10_000 // best > MAX_WIDTH_BPS:
+            continue
+        total += notional
+        if total >= 10**24:
+            break
+    return total
+
+
 def depth_notionals(payload: object, symbol: str) -> tuple[int, int]:
-    """Bid and ask notional. An empty side or a crossed top is not a book."""
+    """Bid and ask notional near the touch. An empty side or a crossed top is not a book."""
     symbol = _pair_name(symbol)
     if not isinstance(payload, dict) or len(payload) > 16:
         raise MexcError(f"no depth for {symbol}" if not isinstance(payload, dict) else f"depth for {symbol} is too wide")
@@ -554,8 +612,8 @@ def depth_notionals(payload: object, symbol: str) -> tuple[int, int]:
     if min(price for price, _notional in asks) < max(price for price, _notional in bids):
         raise MexcError(f"crossed depth for {symbol}")
     positive_int(payload.get("lastUpdateId"), f"depth update for {symbol}")
-    bid_sum = sum(notional for _price, notional in bids)
-    ask_sum = sum(notional for _price, notional in asks)
+    bid_sum = _near_book(bids, max(price for price, _notional in bids))
+    ask_sum = _near_book(asks, min(price for price, _notional in asks))
     if bid_sum >= 10**24 or ask_sum >= 10**24:
         raise MexcError(f"depth notional for {symbol} is too large")
     return bid_sum, ask_sum
@@ -744,6 +802,30 @@ def _public_limit(limit: int, label: str) -> None:
         raise MexcError(f"{label} limit is too large")
 
 
+def _join_klines(earlier: object, recent: object, symbol: str) -> list:
+    """Earlier page, then the latest page. A row that starts at the join is not repeated."""
+    if not isinstance(recent, list) or not recent or not isinstance(recent[0], list):
+        raise MexcError(f"no klines for {symbol}")
+    boundary = recent[0][0]
+    if isinstance(boundary, bool) or not isinstance(boundary, int) or boundary <= 0:
+        raise MexcError(f"kline time for {symbol} is not a timestamp")
+    if not isinstance(earlier, list) or not earlier:
+        raise MexcError(f"kline history for {symbol} is short")
+    kept: list = []
+    for row in earlier:
+        if not isinstance(row, list) or not row:
+            raise MexcError(f"bad kline row for {symbol}")
+        opened = row[0]
+        if isinstance(opened, bool) or not isinstance(opened, int) or opened <= 0:
+            raise MexcError(f"kline time for {symbol} is not a timestamp")
+        if opened >= boundary:
+            continue
+        kept.append(row)
+    if not kept:
+        raise MexcError(f"kline history for {symbol} is short")
+    return kept + list(recent)
+
+
 def parse_klines(symbol: str, payload: object, span_ms: int | None = None) -> list[tuple[int, int, int, int, int]]:
     """Open, high, low, close, and quote volume. A broken candle is refused."""
     symbol = _pair_name(symbol)
@@ -754,6 +836,7 @@ def parse_klines(symbol: str, payload: object, span_ms: int | None = None) -> li
     if len(payload) > 1_000:
         raise MexcError(f"too many klines for {symbol}")
     rows: list[tuple[int, int, int, int, int]] = []
+    skipped_volume = False
     previous_open = 0
     previous_close = 0
     previous_span = 0
@@ -768,8 +851,10 @@ def parse_klines(symbol: str, payload: object, span_ms: int | None = None) -> li
             raise MexcError(f"kline time for {symbol} is not a timestamp")
         if opened <= previous_open or closed_at <= opened or (previous_close > 0 and opened < previous_close):
             raise MexcError(f"kline time for {symbol} is out of order")
-        span = closed_at - opened + 1
-        if (span_ms is not None and span != span_ms) or (previous_span and span != previous_span):
+        span = closed_at - opened
+        if span_ms is not None and span != span_ms and span + 1 != span_ms:
+            raise MexcError(f"kline interval for {symbol} is not the one requested")
+        if previous_span and span != previous_span:
             raise MexcError(f"kline interval for {symbol} is not the one requested")
         previous_open = opened
         previous_close = closed_at
@@ -784,10 +869,15 @@ def parse_klines(symbol: str, payload: object, span_ms: int | None = None) -> li
         except MoneyError as exc:
             raise MexcError(f"bad kline number for {symbol}") from exc
         if quote <= 0 or base_vol <= 0:
-            raise MexcError(f"kline volume for {symbol} is zero")
+            skipped_volume = True
+            continue
         if min(open_px, high, low, close) <= 0 or low > high or open_px < low or open_px > high or close < low or close > high:
             raise MexcError(f"kline range for {symbol} is impossible")
         rows.append((open_px, high, low, close, quote))
+    if len(rows) < 2:
+        if skipped_volume:
+            raise MexcError(f"kline volume for {symbol} is zero")
+        raise MexcError(f"no klines for {symbol}")
     return rows
 
 
@@ -862,6 +952,8 @@ def executed_fill(body: dict[str, Any]) -> tuple[int, int, int] | None:
     that is not a decimal, or a zero quote beside it, is an error: that is not
     an empty fill.
     """
+    if not isinstance(body, dict):
+        raise MexcError("executed order is not an object")
     executed = body.get("executedQty")
     if executed in (None, ""):
         return None
@@ -944,6 +1036,8 @@ def _order_id_text(raw: object) -> str:
 def _require_filled(body: dict[str, Any], label: str) -> None:
     from spotbot.reconcile import order_filled
 
+    if not isinstance(body, dict):
+        raise MexcError(f"{label} status is not filled")
     if order_filled(body):
         return
     status = body.get("status") if isinstance(body, dict) else None
@@ -979,6 +1073,8 @@ def ack_commission(body: dict[str, Any], base_asset: str) -> tuple[int, int]:
 
     A named fee in any other asset, or a positive fee that rounds to zero, is refused.
     """
+    if not isinstance(body, dict):
+        raise MexcError("ack is not an object")
     commission = body.get("commission")
     if commission in (None, ""):
         return 0, 0

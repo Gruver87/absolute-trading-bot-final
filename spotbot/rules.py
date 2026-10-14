@@ -208,7 +208,8 @@ def _refuse_reason(row: dict[str, object]) -> str:
     names = {item.upper() for item in types if isinstance(item, str)} if isinstance(types, list) else set()
     if "MARKET" not in names:
         return "market orders are off"
-    if row.get("tradeSideType") != "1":
+    side = row.get("tradeSideType")
+    if not (side == "1" or (type(side) is int and side == 1)):
         return "spot side is not two-way"
     return ""
 

@@ -167,8 +167,9 @@ def _show_book(loaded: object) -> object:
     from spotbot.money import format_price
 
     legacy = "price_scale" not in loaded
-    for pos in positions:
-        if not isinstance(pos, dict):
+    for index, pos in enumerate(positions):
+        if not isinstance(pos, dict) or len(pos) > 16:
+            positions[index] = "unreadable"
             continue
         for key in ("entry_micro", "peak_micro"):
             raw = pos.get(key)

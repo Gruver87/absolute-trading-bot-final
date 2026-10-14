@@ -43,6 +43,19 @@ def _ema_last(values: list[int], period: int) -> int | None:
         return None
     if any(not _whole(price) or price <= 0 or price >= 10**24 for price in values):
         return None
+    return _ema_acc(values, period)
+
+
+def _ema_signed(values: list[int], period: int) -> int | None:
+    """EMA of a MACD line. The line is a difference and is often below zero."""
+    if not isinstance(values, list) or not _whole(period) or period < 1 or period > 500 or len(values) < period:
+        return None
+    if any(not _whole(price) or price <= -(10**24) or price >= 10**24 for price in values):
+        return None
+    return _ema_acc(values, period)
+
+
+def _ema_acc(values: list[int], period: int) -> int:
     acc = sum(values[:period]) // period
     num = 2
     den = period + 1
@@ -70,8 +83,8 @@ def macd_cross(prices: list[int], fast: int = 12, slow: int = 26, signal: int = 
         macd_line.append(fast_v - slow_v)
     if len(macd_line) < signal + 1:
         return None
-    prev_sig = _ema_last(macd_line[:-1], signal)
-    last_sig = _ema_last(macd_line, signal)
+    prev_sig = _ema_signed(macd_line[:-1], signal)
+    last_sig = _ema_signed(macd_line, signal)
     if prev_sig is None or last_sig is None:
         return None
     prev, last = macd_line[-2], macd_line[-1]
@@ -82,19 +95,56 @@ def macd_cross(prices: list[int], fast: int = 12, slow: int = 26, signal: int = 
     return None
 
 
-def below_lower_band(prices: list[int], period: int = 20) -> bool:
-    """True when the last price is at or under the lower Bollinger band (2 std)."""
+def band_reclaim(prices: list[int], period: int = 20) -> bool:
+    """True when price turns up through the lower band.
+
+    The prior close was at or under the band, and this close is both back
+    above the band and above the prior close. A lower close is still the drop.
+    """
+    if not isinstance(prices, list) or len(prices) < period + 1:
+        return False
+    if any(not _whole(price) or price <= 0 or price >= 10**24 for price in prices[-2:]):
+        return False
+    if prices[-1] <= prices[-2]:
+        return False
+    return below_lower_band(prices[:-1], period) and not below_lower_band(prices, period)
+
+
+def lower_band(prices: list[int], period: int = 20) -> int | None:
+    """Lower Bollinger band of the last `period` prices. None when the window is unusable."""
     if not isinstance(prices, list) or not _whole(period) or period < 1 or period > 500:
-        return False
+        return None
     if len(prices) < period:
-        return False
+        return None
     if any(not _whole(price) or price <= 0 or price >= 10**24 for price in prices):
-        return False
+        return None
     window = prices[-period:]
     mean = sum(window) // period
     var = sum((p - mean) ** 2 for p in window) // period
-    std = math.isqrt(var)
-    return prices[-1] <= mean - 2 * std
+    return mean - 2 * math.isqrt(var)
+
+
+def below_lower_band(prices: list[int], period: int = 20) -> bool:
+    """True when the last price is at or under the lower Bollinger band (2 std)."""
+    band = lower_band(prices, period)
+    if band is None or not prices:
+        return False
+    return prices[-1] <= band
+
+
+def reclaim_still(closes: list[int], ask: int) -> bool:
+    """The live ask is still the reclaim, not a fall back through the band."""
+    if not isinstance(closes, list) or len(closes) < 21:
+        return False
+    if isinstance(ask, bool) or not isinstance(ask, int) or ask <= 0 or ask >= 10**24:
+        return False
+    prior = closes[-2]
+    if isinstance(prior, bool) or not isinstance(prior, int) or prior <= 0:
+        return False
+    band = lower_band(closes)
+    if band is None:
+        return False
+    return ask > band and ask > prior
 
 
 @dataclass(frozen=True)
@@ -114,21 +164,23 @@ def closed_prices(prices: list[int]) -> list[int]:
 
 
 def entry_signal(symbol: str, prices: list[int], rsi_buy: int) -> Entry | None:
-    """BUY only on oversold RSI confirmed by Bollinger or a MACD buy cross."""
+    """BUY when the prior bar was oversold under the band and this close reclaims it.
+
+    A close that is still under the band is the breakdown, not the turn.
+    A fresh MACD sell cross blocks the buy.
+    """
     if not isinstance(symbol, str) or len(symbol) > 32 or not isinstance(prices, list):
         return None
     if isinstance(rsi_buy, bool) or not isinstance(rsi_buy, int) or rsi_buy < 1 or rsi_buy > 500:
         return None
     if any(isinstance(price, bool) or not isinstance(price, int) or price <= 0 or price >= 10**24 for price in prices):
         return None
-    value = rsi(prices)
+    value = rsi(prices[:-1])
     if value is None or value >= rsi_buy:
         return None
     cross = macd_cross(prices)
     if cross == "sell":
         return None
-    if below_lower_band(prices):
-        return Entry(symbol, value, "rsi+bollinger")
-    if cross == "buy":
-        return Entry(symbol, value, "rsi+macd")
-    return None
+    if not band_reclaim(prices):
+        return None
+    return Entry(symbol, value, "rsi+reclaim")

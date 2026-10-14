@@ -51,7 +51,7 @@ from spotbot.money import (
     notional_micro,
 )
 from spotbot.sanity import follows_close, mark_ok, price_grid_ok, price_ok, tick_fits
-from spotbot.signals import closed_prices, entry_signal, rsi
+from spotbot.signals import closed_prices, entry_signal, reclaim_still, rsi
 from spotbot.state import (
     Book,
     Position,
@@ -623,7 +623,7 @@ def _open_positions(
         return _open_liquidity(cfg, client, book, held, slots, path, book_name, deadline)
     opened = 0
     skipped = 0
-    found: list[tuple[str, int, int, str]] = []
+    found: list[tuple[str, int, int, str, list[int]]] = []
     for symbol in cfg.symbols:
         if time.monotonic() > deadline:
             LOG.warning("cycle deadline, stop scan")
@@ -661,6 +661,22 @@ def _open_positions(
             LOG.warning("skip %s ask jump", symbol)
             skipped += 1
             continue
+        if not reclaim_still(closed, price):
+            LOG.info("skip %s: ask is back under the lower band", symbol)
+            skipped += 1
+            continue
+        try:
+            bid_notional, ask_notional = client.depth_notional(symbol)
+        except MexcRateLimit:
+            raise
+        except MexcError as exc:
+            LOG.warning("depth failed: %s", _short(str(exc)))
+            skipped += 1
+            continue
+        if not _bid_is_larger(bid_notional, ask_notional):
+            LOG.info("skip %s: ask size at the touch is not smaller than the bid", symbol)
+            skipped += 1
+            continue
         quotes = venue_quotes(symbol)
         _log_oracle(symbol, price, quotes, data_dir)
         peers = list(quotes.values())
@@ -672,13 +688,13 @@ def _open_positions(
         if lag is None:
             skipped += 1
             continue
-        found.append((symbol, lag, price, signal.reason))
-    order = {symbol: index for index, symbol in enumerate(cheapest_first([(symbol, lag) for symbol, lag, _price, _reason in found]))}
+        found.append((symbol, lag, price, signal.reason, closed))
+    order = {symbol: index for index, symbol in enumerate(cheapest_first([(symbol, lag) for symbol, lag, _price, _reason, _closes in found]))}
     found.sort(key=lambda row: order[row[0]])
-    for symbol, _lag, price, reason in found:
+    for symbol, _lag, price, reason, closes in found:
         if opened >= slots:
             break
-        if _try_buy(cfg, client, book, path, book_name, symbol, price, reason, deadline):
+        if _try_buy(cfg, client, book, path, book_name, symbol, price, reason, deadline, closes):
             opened += 1
         else:
             skipped += 1
@@ -824,6 +840,7 @@ def _try_buy(
     price: int,
     reason: str,
     deadline: float,
+    closes: list[int] | None = None,
 ) -> bool:
     """Buy one symbol. A live order already in flight blocks every other buy."""
     if not cfg.entries:
@@ -914,8 +931,11 @@ def _try_buy(
             LOG.info("skip %s: free USDT is below the order step", symbol)
             return False
         checked = _recheck_ask(client, symbol, price, cfg.spread_bps, rule.price_tick, _risk(cfg)[0])
-        if checked is None:
+        if checked is None or not _touch_still_bid(client, symbol):
             LOG.info("skip %s: the book moved before the order", symbol)
+            return False
+        if closes is not None and not reclaim_still(closes, checked):
+            LOG.info("skip %s: ask is back under the lower band", symbol)
             return False
         client_id = new_client_order_id(symbol, "B")
         remember_pending(book, client_id, symbol, "BUY", 0, spend)
@@ -998,8 +1018,11 @@ def _try_buy(
         )
         return True
     checked = _recheck_ask(client, symbol, price, cfg.spread_bps, rule.price_tick, _risk(cfg)[0])
-    if checked is None:
+    if checked is None or not _touch_still_bid(client, symbol):
         LOG.info("skip %s: the book moved before the order", symbol)
+        return False
+    if closes is not None and not reclaim_still(closes, checked):
+        LOG.info("skip %s: ask is back under the lower band", symbol)
         return False
     ask = checked
     planned = plan_paper_buy(spend, ask, rule.base_step_atoms, rule.taker_bps)
@@ -1095,7 +1118,7 @@ def _resolve_pending(client: MexcClient, book: Book, path: Path) -> str | None:
         except MexcError as exc:
             return _short(str(exc))
         if got is None:
-            return _short(f"{book.pending_side} {book.pending_symbol} status {order.get('status')}")
+            return _short(f"{book.pending_side} {book.pending_symbol} status {_status_text(order)}")
         base_atoms, quote_micro, price_micro = got
         over = _over_request(book, base_atoms, quote_micro)
         if over:
@@ -1103,7 +1126,7 @@ def _resolve_pending(client: MexcClient, book: Book, path: Path) -> str | None:
         if not _apply_progress(client, book, order, base_atoms, quote_micro, price_micro):
             return "pending fill was not recorded"
         save_book(path, book)
-        return _short(f"{book.pending_side} {book.pending_symbol} status {order.get('status')}")
+        return _short(f"{book.pending_side} {book.pending_symbol} status {_status_text(order)}")
     if not order_filled(order):
         try:
             got = executed_fill(order)
@@ -1149,9 +1172,15 @@ def _over_request(book: Book, base_atoms: int, quote_micro: int) -> str | None:
     """Refuse a fill larger than the order we sent. The client id stays pending."""
     if isinstance(base_atoms, bool) or not isinstance(base_atoms, int) or isinstance(quote_micro, bool) or not isinstance(quote_micro, int):
         return "fill is not an integer"
-    if book.pending_side == "BUY" and book.pending_quote_micro > 0 and quote_micro > book.pending_quote_micro:
+    if base_atoms < 0 or quote_micro < 0 or base_atoms >= 10**24 or quote_micro >= 10**24:
+        return "fill is too large"
+    if book.pending_side == "BUY" and book.pending_quote_micro <= 0:
+        return "pending buy has no requested quote"
+    if book.pending_side == "BUY" and quote_micro > book.pending_quote_micro:
         return "pending buy filled more quote than requested"
-    if book.pending_side == "SELL" and book.pending_base_atoms > 0 and base_atoms > book.pending_base_atoms:
+    if book.pending_side == "SELL" and book.pending_base_atoms <= 0:
+        return "pending sell has no requested base"
+    if book.pending_side == "SELL" and base_atoms > book.pending_base_atoms:
         return "pending sell filled more base than requested"
     return None
 
@@ -1164,6 +1193,9 @@ def _apply_progress(
     quote_micro: int,
     price_micro: int,
 ) -> bool:
+    if not isinstance(order, dict):
+        LOG.warning("pending order has no exchange id")
+        return False
     raw_id = order.get("orderId")
     if isinstance(raw_id, str):
         order_id = raw_id.strip()
@@ -1236,7 +1268,7 @@ def _order_fees(
 ) -> tuple[int, int, int, int] | None:
     """USDT fee and base-asset fee. None when the fee cannot be priced."""
     if not usdt_symbol_ok(symbol):
-        LOG.warning("fee asset unknown for %s", symbol)
+        LOG.warning("fee asset unknown")
         return None
     try:
         trades = client.my_trades(symbol, order_id=order_id)
@@ -1474,6 +1506,29 @@ def _probe_lift(
     return rows, bid, ask, venue_quotes(symbol)
 
 
+def _touch_still_bid(client: MexcClient, symbol: str) -> bool:
+    """The touch immediately before the order. A heavier ask is not bought."""
+    try:
+        bid_notional, ask_notional = client.depth_notional(symbol)
+    except MexcRateLimit:
+        raise
+    except MexcError as exc:
+        LOG.warning("depth failed, skip buy: %s", _short(str(exc)))
+        return False
+    return _bid_is_larger(bid_notional, ask_notional)
+
+
+def _bid_is_larger(bid_notional: object, ask_notional: object) -> bool:
+    """True when resting size at the touch is on the bid. Far levels are already excluded."""
+    if isinstance(bid_notional, bool) or isinstance(ask_notional, bool):
+        return False
+    if not isinstance(bid_notional, int) or not isinstance(ask_notional, int):
+        return False
+    if bid_notional <= 0 or ask_notional <= 0 or bid_notional >= 10**24 or ask_notional >= 10**24:
+        return False
+    return bid_notional > ask_notional
+
+
 def _risk(cfg: Config) -> tuple[int, int, int, int]:
     if cfg.mode == "liquidity":
         return 150, 250, 120, 80
@@ -1495,6 +1550,18 @@ def _shown_name(book_name: object, path: Path) -> str:
     if isinstance(stem, str) and stem and len(stem) <= 32:
         return stem
     return "book"
+
+
+def _status_text(order: object) -> str:
+    """A short order status. A long or foreign value is not copied into the log."""
+    if not isinstance(order, dict):
+        return ""
+    status = order.get("status")
+    if isinstance(status, str) and status and len(status) <= 32:
+        return status
+    if isinstance(status, int) and not isinstance(status, bool) and 0 <= status <= 9:
+        return str(status)
+    return ""
 
 
 def _short(text: object) -> str:

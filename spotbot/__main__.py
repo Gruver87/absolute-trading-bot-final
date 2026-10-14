@@ -111,6 +111,13 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
 
+def _pause_sec(pause: object) -> int:
+    """The wait between cycles. A missing or huge pause is one day, not an endless sleep."""
+    if isinstance(pause, bool) or not isinstance(pause, int) or pause < 1 or pause > 86_400:
+        return 86_400
+    return pause
+
+
 def _trade(args: argparse.Namespace, cfg: Config, client: MexcClient, data_dir: Path) -> int:
     """One process, one ledger. The caller already holds the directory."""
     if args.sleeves:
@@ -146,7 +153,7 @@ def _trade(args: argparse.Namespace, cfg: Config, client: MexcClient, data_dir: 
                 pause = cfg.interval_sec
             if args.once:
                 return 0
-            time.sleep(pause)
+            time.sleep(_pause_sec(pause))
     book_path = ledger_dir(data_dir, cfg.live) / (
         "book_liquidity.json" if cfg.mode == "liquidity" else "book.json"
     )
@@ -180,7 +187,7 @@ def _trade(args: argparse.Namespace, cfg: Config, client: MexcClient, data_dir: 
             pause = cfg.interval_sec
         if args.once:
             return 0
-        time.sleep(pause)
+        time.sleep(_pause_sec(pause))
 
 
 if __name__ == "__main__":

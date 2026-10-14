@@ -27,6 +27,12 @@ def marked_equity(
     """
     if isinstance(cash_micro, bool) or not isinstance(cash_micro, int) or cash_micro <= -10**24 or cash_micro >= 10**24:
         return None
+    if not isinstance(positions, list) or len(positions) > 8:
+        return None
+    if not isinstance(marks, dict) or len(marks) > 14:
+        return None
+    if taker_bps is not None and (not isinstance(taker_bps, dict) or len(taker_bps) > 14):
+        return None
     equity = cash_micro
     for pos in positions:
         price = marks.get(pos.symbol, 0)
@@ -68,11 +74,18 @@ def note_pair_stop(book: Book, symbol: str, now: int, count: int, lock_sec: int)
         return
     if now <= 0 or now > 4_102_444_800 or count < 2 or not usdt_symbol_ok(symbol):
         return
+    if count > _MAX_STAMPS:
+        count = _MAX_STAMPS
     if lock_sec > 86_400:
         lock_sec = 86_400
+    prior = (book.pair_stops or {}).get(symbol, [])
+    if not isinstance(prior, list):
+        prior = []
+    elif len(prior) > _MAX_STAMPS:
+        prior = prior[-_MAX_STAMPS:]
     fresh = [
         stamp
-        for stamp in (book.pair_stops or {}).get(symbol, [])
+        for stamp in prior
         if isinstance(stamp, int) and not isinstance(stamp, bool) and now - STOP_LOOKBACK_SEC < stamp <= now
     ]
     fresh.append(now)

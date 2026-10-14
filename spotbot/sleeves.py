@@ -236,4 +236,4 @@ def run_sleeves(cfg: Config, client: MexcClient, data_dir: Path) -> None:
             LOG.error("sleeve %s stopped on rate limit; the other sleeves wait", sleeve.name)
             raise
         except MexcError as exc:
-            LOG.error("sleeve %s failed closed: %s", sleeve.name, exc)
+            LOG.error("sleeve %s failed closed: %s", sleeve.name, str(exc)[:180])

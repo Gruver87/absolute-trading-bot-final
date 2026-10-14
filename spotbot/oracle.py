@@ -178,7 +178,7 @@ def venue_quotes(symbol: str, timeout_sec: int = 5) -> dict[str, int]:
             LOG.warning("oracle %s %s: %s", label, symbol, text if len(text) <= 180 else text[:180])
             continue
         if response.status_code != 200:
-            LOG.warning("oracle %s %s HTTP %s", label, symbol, response.status_code)
+            LOG.warning("oracle %s %s HTTP %s", label, symbol, _shown_http(response.status_code))
             continue
         payload = getattr(response, "content", b"")
         if isinstance(payload, (bytes, bytearray)) and len(payload) > _MAX_BODY:
@@ -189,9 +189,16 @@ def venue_quotes(symbol: str, timeout_sec: int = 5) -> dict[str, int]:
             if raw is None:
                 continue
             found[label] = parse_price(raw if isinstance(raw, str) else decimal_text(raw))
-        except (MoneyError, ValueError, TypeError) as exc:
+        except (MoneyError, ValueError, TypeError, RecursionError, MemoryError) as exc:
             LOG.warning("oracle %s %s parse: %s", label, symbol, str(exc)[:180])
     return found
+
+
+def _shown_http(code: object) -> str:
+    """A real HTTP status. Anything else is not written as a number."""
+    if isinstance(code, bool) or not isinstance(code, int) or code < 100 or code > 599:
+        return "refused"
+    return str(code)
 
 
 def _okx_inst(symbol: str) -> str | None:

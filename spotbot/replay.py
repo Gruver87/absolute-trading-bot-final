@@ -13,7 +13,8 @@ from spotbot.liquidity import candle_lift
 from spotbot.money import notional_micro
 from spotbot.rules import budget_micro, plan_paper_buy
 from spotbot.sanity import mark_ok, price_ok, slip_price
-from spotbot.signals import entry_signal
+from spotbot.mexc import KLINE_LIMIT
+from spotbot.signals import entry_signal, reclaim_still
 
 
 @dataclass(frozen=True)
@@ -61,14 +62,43 @@ def replay_closes(
     min_notional_micro: int,
     base_step_atoms: int = 1,
     slip_bps: int = 0,
+    entry_from: int = 0,
+    opens: list[int] | None = None,
+    cooldown_bars: int = 0,
+    lookback_bars: int = 0,
+    lock_bars: int = 0,
+    lock_count: int = 3,
 ) -> ReplayResult:
-    if not closes or closes[0] <= 0 or base_step_atoms <= 0:
+    if (
+        not closes
+        or closes[0] <= 0
+        or base_step_atoms <= 0
+        or isinstance(entry_from, bool)
+        or not isinstance(entry_from, int)
+        or entry_from < 0
+        or not _bar_span(cooldown_bars)
+        or not _bar_span(lookback_bars)
+        or not _bar_span(lock_bars)
+        or isinstance(lock_count, bool)
+        or not isinstance(lock_count, int)
+        or lock_count < 2
+        or (opens is not None and (not isinstance(opens, list) or len(opens) != len(closes)))
+    ):
         return ReplayResult(0, 0, 0, 0, False, ())
-    clean = [closes[0]]
-    for price in closes[1:]:
-        if price > 0 and price_ok(clean[-1], price):
-            clean.append(price)
+    clean: list[int] = []
+    clean_opens: list[int] | None = [] if opens is not None else None
+    for index, price in enumerate(closes):
+        if not _usable(price):
+            continue
+        if opens is not None and not _usable(opens[index]):
+            continue
+        clean.append(price)
+        if clean_opens is not None and opens is not None:
+            clean_opens.append(opens[index])
+    if not clean:
+        return ReplayResult(0, 0, 0, 0, False, ())
     closes = clean
+    opens = clean_opens
     cash = cash_micro
     net = 0
     fees = 0
@@ -81,13 +111,22 @@ def replay_closes(
     spent = 0
     start = 40
     i = start
+    stamps: list[int] = []
+    cooldown_until = 0
+    lock_until = 0
     while i < len(closes):
         if entry == 0:
-            window = closes[: i + 1]
+            if i < entry_from or i < cooldown_until or i < lock_until or _entry_jump(closes, i):
+                i += 1
+                continue
+            window = _signal_closes(closes, i)
             if entry_signal("REPLAY", window, rsi_buy) is None:
                 i += 1
                 continue
-            fill = _next_price(closes, i)
+            fill = _fill_price(opens, closes, i)
+            if fill is not None and fill > 0 and not reclaim_still(window, fill):
+                i += 1
+                continue
             paid = slip_price(fill or 0, slip_bps, True)
             if paid <= 0:
                 break
@@ -104,7 +143,7 @@ def replay_closes(
             peak = paid
             base = bought
             spent = debit
-            i += 2
+            i += 1
             continue
         price = slip_price(closes[i], slip_bps, False)
         if price <= 0 or not mark_ok(peak, price):
@@ -116,11 +155,7 @@ def replay_closes(
         if reason is None:
             i += 1
             continue
-        fill = _next_price(closes, i)
-        sold = slip_price(fill or 0, slip_bps, False)
-        if sold <= 0 or not mark_ok(peak, sold):
-            i += 1
-            continue
+        sold = price
         credit, fee = paper_sell(base, sold, taker_bps)
         gross = notional_micro(base, sold)
         if credit <= 0 or fee < 0 or credit + fee != gross:
@@ -134,10 +169,13 @@ def replay_closes(
         if pnl > 0:
             wins += 1
         fills.append(Fill(entry, sold, pnl))
+        stamps, cooldown_until, lock_until = _after_stop(
+            reason, i, cooldown_bars, lookback_bars, lock_bars, lock_count, stamps, cooldown_until, lock_until
+        )
         entry = 0
         base = 0
         spent = 0
-        i += 2
+        i += 1
     mark, known = _open_mark(entry, peak, base, spent, closes[-1] if closes else 0, taker_bps, slip_bps)
     return ReplayResult(
         trades, wins, net, fees, ended_open=entry != 0, fills=tuple(fills), open_micro=mark, open_known=known
@@ -157,18 +195,47 @@ def replay_lift_bars(
     min_notional_micro: int,
     base_step_atoms: int = 1,
     slip_bps: int = 0,
+    entry_from: int = 0,
+    opens: list[int] | None = None,
+    cooldown_bars: int = 0,
+    lookback_bars: int = 0,
+    lock_bars: int = 0,
+    lock_count: int = 3,
 ) -> ReplayResult:
     """Candle half of the liquidity rule. Bid/ask and the oracle are not in the tape.
 
-    Each bar is high, low, close, quote volume. A jump in close is dropped.
+    Each bar is high, low, close, quote volume. A jumped close stays in the tape.
     """
-    if not bars or bars[0][2] <= 0 or base_step_atoms <= 0:
+    if (
+        not bars
+        or bars[0][2] <= 0
+        or base_step_atoms <= 0
+        or isinstance(entry_from, bool)
+        or not isinstance(entry_from, int)
+        or entry_from < 0
+        or not _bar_span(cooldown_bars)
+        or not _bar_span(lookback_bars)
+        or not _bar_span(lock_bars)
+        or isinstance(lock_count, bool)
+        or not isinstance(lock_count, int)
+        or lock_count < 2
+        or (opens is not None and (not isinstance(opens, list) or len(opens) != len(bars)))
+    ):
         return ReplayResult(0, 0, 0, 0, False, ())
-    clean = [bars[0]]
-    for bar in bars[1:]:
-        if bar[2] > 0 and price_ok(clean[-1][2], bar[2]):
-            clean.append(bar)
+    clean: list[tuple[int, int, int, int]] = []
+    clean_opens: list[int] | None = [] if opens is not None else None
+    for index, bar in enumerate(bars):
+        if bar[2] <= 0:
+            continue
+        if opens is not None and not _usable(opens[index]):
+            continue
+        clean.append(bar)
+        if clean_opens is not None and opens is not None:
+            clean_opens.append(opens[index])
+    if not clean:
+        return ReplayResult(0, 0, 0, 0, False, ())
     bars = clean
+    opens = clean_opens
     cash = cash_micro
     net = 0
     fees = 0
@@ -180,15 +247,21 @@ def replay_lift_bars(
     base = 0
     spent = 0
     i = 14
+    stamps: list[int] = []
+    cooldown_until = 0
+    lock_until = 0
     while i < len(bars):
         if entry == 0:
+            if i < entry_from or i < cooldown_until or i < lock_until or _entry_jump([bar[2] for bar in bars], i):
+                i += 1
+                continue
             window = bars[: i + 1]
             volumes = [bar[3] for bar in window] + [1]
             high, low, close, _quote = window[-1]
             if candle_lift("REPLAY", volumes, high, low, close) is None:
                 i += 1
                 continue
-            fill = _next_price([bar[2] for bar in bars], i)
+            fill = _fill_price(opens, [bar[2] for bar in bars], i)
             paid = slip_price(fill or 0, slip_bps, True)
             if paid <= 0:
                 break
@@ -205,7 +278,7 @@ def replay_lift_bars(
             peak = paid
             base = bought
             spent = debit
-            i += 2
+            i += 1
             continue
         close = slip_price(bars[i][2], slip_bps, False)
         if close <= 0 or not mark_ok(peak, close):
@@ -217,11 +290,7 @@ def replay_lift_bars(
         if reason is None:
             i += 1
             continue
-        fill = _next_price([bar[2] for bar in bars], i)
-        sold = slip_price(fill or 0, slip_bps, False)
-        if sold <= 0 or not mark_ok(peak, sold):
-            i += 1
-            continue
+        sold = close
         credit, fee = paper_sell(base, sold, taker_bps)
         gross = notional_micro(base, sold)
         if credit <= 0 or fee < 0 or credit + fee != gross:
@@ -235,15 +304,83 @@ def replay_lift_bars(
         if pnl > 0:
             wins += 1
         fills.append(Fill(entry, sold, pnl))
+        stamps, cooldown_until, lock_until = _after_stop(
+            reason, i, cooldown_bars, lookback_bars, lock_bars, lock_count, stamps, cooldown_until, lock_until
+        )
         entry = 0
         base = 0
         spent = 0
-        i += 2
+        i += 1
     last = bars[-1][2] if bars else 0
     mark, known = _open_mark(entry, peak, base, spent, last, taker_bps, slip_bps)
     return ReplayResult(
         trades, wins, net, fees, ended_open=entry != 0, fills=tuple(fills), open_micro=mark, open_known=known
     )
+
+
+def _entry_jump(closes: list[int], index: int) -> bool:
+    """The cycle keeps a jumped close and only refuses the entry on that bar."""
+    if index <= 0:
+        return False
+    try:
+        return not price_ok(closes[index - 1], closes[index])
+    except ValueError:
+        return True
+
+
+def _signal_closes(closes: list[int], index: int) -> list[int]:
+    """Same closed bars the cycle sees: the fetch minus the candle that is still open."""
+    keep = KLINE_LIMIT - 1
+    if keep < 1 or index < 0:
+        return []
+    start = 0 if index + 1 <= keep else index + 1 - keep
+    return closes[start : index + 1]
+
+
+def _bar_span(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _after_stop(
+    reason: str,
+    index: int,
+    cooldown_bars: int,
+    lookback_bars: int,
+    lock_bars: int,
+    lock_count: int,
+    stamps: list[int],
+    cooldown_until: int,
+    lock_until: int,
+) -> tuple[list[int], int, int]:
+    """A stop waits, and enough stops inside a day lock the pair. Other exits do not."""
+    if reason != "stop":
+        return stamps, cooldown_until, lock_until
+    if cooldown_bars > 0:
+        cooldown_until = index + cooldown_bars
+    if lookback_bars > 0:
+        stamps = [stamp for stamp in stamps if index - lookback_bars < stamp <= index]
+    stamps.append(index)
+    stamps = stamps[-8:]
+    if lock_bars > 0 and len(stamps) >= lock_count:
+        lock_until = index + lock_bars
+    return stamps, cooldown_until, lock_until
+
+
+def _usable(price: object) -> bool:
+    return isinstance(price, int) and not isinstance(price, bool) and 0 < price < 10**24
+
+
+def _fill_price(opens: list[int] | None, closes: list[int], index: int) -> int | None:
+    """First traded price after the signal bar.
+
+    A market order fires at the next open. Callers without opens keep the next close.
+    """
+    nxt = index + 1
+    if opens is not None:
+        if nxt >= len(opens) or not _usable(opens[nxt]):
+            return None
+        return opens[nxt]
+    return _next_price(closes, index)
 
 
 def _next_price(prices: list[int], index: int) -> int | None:

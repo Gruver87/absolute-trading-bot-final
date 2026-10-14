@@ -94,7 +94,7 @@ def parse_micro_nonneg(text: str) -> int:
 
 def format_fixed(amount: int, scale: int) -> str:
     """Render an integer scaled amount without binary float."""
-    if isinstance(amount, bool) or isinstance(scale, bool) or not isinstance(amount, int) or not isinstance(scale, int) or amount < 0 or amount >= _MAX_AMOUNT or scale <= 1:
+    if isinstance(amount, bool) or isinstance(scale, bool) or not isinstance(amount, int) or not isinstance(scale, int) or amount < 0 or amount >= _MAX_AMOUNT or scale <= 1 or scale > 10**18:
         raise MoneyError("wire amount must be a non-negative int")
     digits = 0
     rest = scale

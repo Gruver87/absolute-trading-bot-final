@@ -175,7 +175,8 @@ def load_config(live_flag: bool, mode: str | None = None) -> Config:
     stop_lock_count = _env_int("SPOT_STOP_LOCK_COUNT", "3", 2, 10)
     stop_lock_sec = _env_int("SPOT_STOP_LOCK_SEC", "14400", 0, 86_400)
     spread_bps = _env_int("SPOT_SPREAD_BPS", "30", 1, 500)
-    entries = _env_flag("SPOT_ENTRIES", "0")
+    _env_flag("SPOT_ENTRIES", "0")
+    entries = False
     try:
         paper_cash = parse_micro(os.environ.get("SPOT_PAPER_CASH_USDT", "1000"))
         min_notional = parse_micro(os.environ.get("SPOT_MIN_USDT", "3"))

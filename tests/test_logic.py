@@ -84,6 +84,9 @@ def test_paper_fill_uses_the_book_side(tmp_path, monkeypatch) -> None:
         def book_top(self, _symbol: str) -> tuple[int, int]:
             return bid, ask
 
+        def depth_notional(self, _symbol: str) -> tuple[int, int]:
+            return 2, 1
+
     cfg = Config(
         symbols=("BTCUSDT",),
         paper_cash_micro=20_000_000,
@@ -113,6 +116,14 @@ def test_paper_fill_uses_the_book_side(tmp_path, monkeypatch) -> None:
     assert _try_buy(replace(cfg, entries=True), _Ask(), book, tmp_path / "ask.json", "book", "BTCUSDT", ask, "test", 10**12)
     assert book.positions[0].entry_micro == ask
     assert book.positions[0].peak_micro == ask
+
+    class _AskHeavy(_Ask):
+        def depth_notional(self, _symbol: str) -> tuple[int, int]:
+            return 1, 2
+
+    heavy = Book(cash_micro=20_000_000, positions=[], realized_micro=0)
+    assert _try_buy(replace(cfg, entries=True), _AskHeavy(), heavy, tmp_path / "heavy.json", "book", "BTCUSDT", ask, "test", 10**12) is False
+    assert heavy.positions == []
 
     class _Moved(_Ask):
         def book_top(self, _symbol: str) -> tuple[int, int]:
@@ -1190,6 +1201,10 @@ def test_a_nearby_code_is_not_an_unknown_order() -> None:
     assert parse_symbol_rule(typed).tradable is False
     sided = dict(row)
     sided["tradeSideType"] = 1
+    assert parse_symbol_rule(sided).tradable is True
+    sided["tradeSideType"] = True
+    assert parse_symbol_rule(sided).tradable is False
+    sided["tradeSideType"] = 1.0
     assert parse_symbol_rule(sided).tradable is False
 
 
@@ -2544,7 +2559,7 @@ def test_a_full_disk_is_not_another_process() -> None:
 
     from spotbot.mexc import DecimalChange, MexcClient, MexcError, rank_liquid
     from spotbot.ops_http import _ops_path
-    from spotbot.signals import entry_signal, rsi
+    from spotbot.signals import band_reclaim, entry_signal, rsi
     from spotbot.state import _lock_held_by_other
 
     assert _lock_held_by_other(OSError(errno.EACCES, "busy")) is True
@@ -2573,8 +2588,12 @@ def test_a_full_disk_is_not_another_process() -> None:
     assert rsi([10**24] * 20) is None
     assert rsi([100] * 20, 600) is None
     assert entry_signal("R" * 40, [100] * 30, 101) is None
-    assert entry_signal("BTCUSDT", [100] * 30, 101) is not None
-    assert entry_signal("REPLAY", [100] * 30, 101) is not None
+    assert entry_signal("BTCUSDT", [100] * 30, 101) is None
+    assert entry_signal("REPLAY", [100] * 30, 101) is None
+    reclaim = [100] * 40 + [70, 99]
+    assert entry_signal("BTCUSDT", reclaim, 101).reason == "rsi+reclaim"
+    assert band_reclaim([100] * 40 + [80, 79]) is False
+    assert entry_signal("BTCUSDT", [100] * 40 + [70, 70], 35) is None
 
 
 def test_a_huge_file_does_not_replace_the_book(tmp_path) -> None:
@@ -3052,8 +3071,11 @@ def test_a_huge_log_does_not_start(tmp_path) -> None:
         raise AssertionError("decimal")
     except MoneyError as exc:
         assert "12.3.4" not in str(exc)
-    assert entry_signal("BTCUSDT", [100] * 30, 101) is not None
-    assert entry_signal("REPLAY", [100] * 30, 101) is not None
+    assert entry_signal("BTCUSDT", [100] * 30, 101) is None
+    assert entry_signal("REPLAY", [100] * 30, 101) is None
+    reclaim = [100] * 40 + [70, 99]
+    assert entry_signal("BTCUSDT", reclaim, 101).reason == "rsi+reclaim"
+    assert entry_signal("BTCUSDT", [100] * 40 + [70, 70], 35) is None
     assert entry_signal("BTCUSDT", [100] * 30, 501) is None
     assert macd_cross([100] * 40, 20, 10, 9) is None
     _log_oracle("A" * 40, 100, {"binance": 100}, tmp_path)
@@ -3074,6 +3096,198 @@ def test_a_huge_log_does_not_start(tmp_path) -> None:
         raise AssertionError("status size")
     except OpsError as exc:
         assert "unreadable" in str(exc)
+
+
+def test_a_long_day_is_not_a_guard(tmp_path) -> None:
+    from spotbot.mexc import MexcError, ack_commission, executed_fill, signed_payload, _require_filled
+    from spotbot.money import format_fixed
+    from spotbot.state import LedgerError, _guard_day_ok
+
+    try:
+        _guard_day_ok("1" * 40)
+        raise AssertionError("day")
+    except LedgerError as exc:
+        assert "date" in str(exc)
+        assert "111" not in str(exc)
+    try:
+        format_fixed(1, 10**19)
+        raise AssertionError("scale")
+    except MoneyError as exc:
+        assert "wire" in str(exc)
+    try:
+        signed_payload({"orderId": "1", "fills": list(range(129))}, False)
+        raise AssertionError("fills")
+    except MexcError as exc:
+        assert "fills" in str(exc)
+    assert signed_payload([{"id": "1"}], True) == [{"id": "1"}]
+    try:
+        signed_payload([{str(i): "1" for i in range(33)}], True)
+        raise AssertionError("wide trade")
+    except MexcError as exc:
+        assert "wide" in str(exc)
+    try:
+        signed_payload(["nope"], True)
+        raise AssertionError("trade object")
+    except MexcError as exc:
+        assert "object" in str(exc)
+    try:
+        executed_fill("nope")
+        raise AssertionError("fill")
+    except MexcError as exc:
+        assert "object" in str(exc)
+    try:
+        _require_filled("nope", "buy")
+        raise AssertionError("status")
+    except MexcError as exc:
+        assert "filled" in str(exc)
+    try:
+        ack_commission("nope", "BTC")
+        raise AssertionError("ack")
+    except MexcError as exc:
+        assert "object" in str(exc)
+
+
+def test_a_wide_stop_count_still_locks() -> None:
+    from spotbot.engine import _status_text
+    from spotbot.guards import marked_equity, note_pair_stop, pair_locked
+    from spotbot.mexc import backoff_sec
+    from spotbot.oracle import _shown_http
+    from spotbot.state import Book
+
+    book = Book(cash_micro=1, positions=[], realized_micro=0)
+    for step in range(8):
+        note_pair_stop(book, "BTCUSDT", 1_700_000_000 + step, 100, 60)
+    assert pair_locked(book, "BTCUSDT", 1_700_000_008) is True
+    broken = Book(cash_micro=1, positions=[], realized_micro=0, pair_stops={"BTCUSDT": 1})
+    note_pair_stop(broken, "BTCUSDT", 1_700_000_000, 2, 60)
+    assert broken.pair_stops["BTCUSDT"] == [1_700_000_000]
+    assert marked_equity(1, [object()] * 9, {}) is None
+    assert marked_equity(1, [], {str(i): 1 for i in range(15)}) is None
+    assert backoff_sec(None, 10**9) == 86_400
+    assert _shown_http(10**20) == "refused"
+    assert _shown_http(404) == "404"
+    assert _status_text({"status": "S" * 40}) == ""
+    assert _status_text({"status": 2}) == "2"
+
+
+def test_a_directory_is_not_a_book(tmp_path) -> None:
+    from spotbot.engine import _apply_progress, _over_request
+    from spotbot.ops_http import _show_book
+    from spotbot.state import Book, LedgerError, load_book, remember_pending, write_atomic
+
+    folder = tmp_path / "book.json"
+    folder.mkdir()
+    try:
+        load_book(folder, 1)
+        raise AssertionError("dir book")
+    except LedgerError as exc:
+        assert "file" in str(exc)
+    try:
+        write_atomic(folder, "x")
+        raise AssertionError("dir write")
+    except LedgerError as exc:
+        assert "file" in str(exc)
+    buy = Book(cash_micro=1, positions=[], realized_micro=0)
+    remember_pending(buy, "abc", "BTCUSDT", "BUY", 0, 0)
+    assert _over_request(buy, 1, 1) == "pending buy has no requested quote"
+    sell = Book(cash_micro=1, positions=[], realized_micro=0)
+    sell.pending_side = "SELL"
+    sell.pending_base_atoms = 0
+    assert _over_request(sell, 1, 1) == "pending sell has no requested base"
+    buy.pending_quote_micro = 100
+    assert _over_request(buy, 1, 10**24) == "fill is too large"
+    wide = {
+        "cash_micro": 1,
+        "price_scale": 1_000_000_000_000,
+        "positions": [{"entry_micro": 1_000_000_000_000, "peak_micro": 1_000_000_000_000, **{str(i): 1 for i in range(15)}}],
+    }
+    shown = _show_book(wide)
+    assert shown["positions"] == ["unreadable"]
+    assert _apply_progress(None, buy, "nope", 1, 1, 1) is False
+
+
+def test_a_file_is_not_a_ledger_directory(tmp_path, caplog) -> None:
+    import logging
+
+    from spotbot.__main__ import _pause_sec
+    from spotbot.analyzer import _native_file
+    from spotbot.engine import _order_fees
+    from spotbot.state import LedgerError, hold_ledger
+
+    planted = tmp_path / "paper"
+    planted.write_text("x", encoding="utf-8")
+    try:
+        with hold_ledger(planted):
+            raise AssertionError("held")
+    except LedgerError as exc:
+        assert "directory" in str(exc)
+    assert _pause_sec(60) == 60
+    assert _pause_sec(10**9) == 86_400
+    assert _pause_sec(True) == 86_400
+    folder = tmp_path / "dll"
+    folder.mkdir()
+    assert _native_file(folder) is False
+    small = tmp_path / "spotbot_native.dll"
+    small.write_bytes(b"x" * 11)
+    assert _native_file(small, 10) is False
+    assert _native_file(small) is True
+    with caplog.at_level(logging.WARNING):
+        assert _order_fees(None, "Z" * 80, "1", "BUY") is None
+    assert "Z" * 80 not in caplog.text
+
+
+def test_macd_cross_still_counts_below_zero() -> None:
+    from spotbot.signals import _ema_last, _ema_signed, macd_cross
+
+    down = [2000] * 40 + [2000 - i * 30 for i in range(1, 30)]
+    series = down + [down[-1] + i * 40 for i in range(1, 50)]
+    assert macd_cross(series[:72]) == "buy"
+    assert _ema_last([100, -1, 100], 2) is None
+    assert _ema_signed([-5, -4, -3], 2) is not None
+
+
+def test_a_pair_without_a_lot_does_not_stop_the_median(monkeypatch, capsys) -> None:
+    from spotbot.replay_main import main
+    from spotbot.rules import SymbolRule
+
+    class _Client:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+        def symbol_rule(self, symbol: str) -> SymbolRule:
+            if symbol == "PEPEUSDT":
+                return SymbolRule(symbol, False, "base step is missing", 5, 0, 1, 0, "PEPE", 1)
+            return SymbolRule(symbol, True, "", 5, 1, 1, 0, "COIN", 1)
+
+        def ohlcv(self, symbol: str, interval: str, limit: int) -> list[tuple[int, int, int, int, int]]:
+            return [(1, 1, 1, 1_000_000_000_000, 1_000_000)] * limit
+
+    monkeypatch.setattr("spotbot.replay_main.MexcClient", _Client)
+    monkeypatch.setattr("spotbot.replay_main.time.sleep", lambda _sec: None)
+    assert main(["--sleeves", "--limit", "160"]) == 0
+    assert "PEPEUSDT" in capsys.readouterr().out
+    assert main(["--symbol", "PEPEUSDT", "--limit", "160"]) == 1
+
+
+def test_the_env_cannot_turn_entries_on(monkeypatch) -> None:
+    from spotbot.config import load_config
+
+    monkeypatch.setenv("SPOT_SYMBOLS", "BTCUSDT")
+    monkeypatch.setenv("SPOT_INTERVAL_SEC", "60")
+    monkeypatch.setenv("SPOT_LIVE", "0")
+    monkeypatch.setenv("SPOT_MODE", "rsi")
+    monkeypatch.setenv("SPOT_TAKER_BPS", "5")
+    monkeypatch.setenv("SPOT_DAILY_LOSS_BPS", "500")
+    monkeypatch.setenv("SPOT_STOP_COOLDOWN_SEC", "900")
+    monkeypatch.setenv("SPOT_PAPER_CASH_USDT", "1000")
+    monkeypatch.setenv("SPOT_MIN_USDT", "3")
+    monkeypatch.setenv("SPOT_ALLOC_BPS", "2000")
+    monkeypatch.setenv("SPOT_RSI_BUY", "35")
+    monkeypatch.setenv("SPOT_MAX_POSITIONS", "1")
+    monkeypatch.setenv("SPOT_ENTRIES", "1")
+    assert load_config(False).entries is False
+    monkeypatch.setenv("SPOT_ENTRIES", "0")
+    assert load_config(False).entries is False
 
 
 def test_lift_needs_volume_and_bids() -> None:
@@ -3105,11 +3319,135 @@ def test_flat_round_trip_loses_the_taker_fee() -> None:
     assert credit - spend < 0
 
 
+def test_an_ask_back_under_the_band_is_not_bought(tmp_path) -> None:
+    from spotbot.config import Config
+    from spotbot.engine import _open_positions
+    from spotbot.signals import reclaim_still
+    from spotbot.state import Book
+
+    closes = [100] * 40 + [90, 100]
+    assert reclaim_still(closes, 100) is True
+    assert reclaim_still(closes, 90) is False
+
+    class _Back:
+        def klines(self, _symbol: str) -> list[int]:
+            return closes + [100]
+
+        def book_top(self, _symbol: str) -> tuple[int, int]:
+            return 90, 90
+
+    cfg = Config(
+        symbols=("BTCUSDT",),
+        paper_cash_micro=20_000_000,
+        interval_sec=60,
+        max_positions=1,
+        alloc_bps=10_000,
+        min_notional_micro=1_000_000,
+        rsi_buy=35,
+        stop_bps=350,
+        take_bps=700,
+        trail_arm_bps=300,
+        trail_gap_bps=200,
+        live=False,
+        mode="rsi",
+        taker_bps=5,
+        daily_loss_bps=500,
+        stop_cooldown_sec=900,
+        symbol_lock=True,
+        api_key="",
+        api_secret="",
+        entries=True,
+    )
+    book = Book(cash_micro=20_000_000, positions=[], realized_micro=0)
+    opened, skipped = _open_positions(cfg, _Back(), book, tmp_path / "back.json", "book", 10**12)
+    assert opened == 0 and skipped == 1 and book.positions == []
+
+
+def test_rsi_entry_refuses_a_heavier_ask_at_the_touch(tmp_path) -> None:
+    from spotbot.config import Config
+    from spotbot.engine import _open_positions
+    from spotbot.state import Book
+
+    closes = [100] * 40 + [90, 100, 100]
+
+    class _Book:
+        def klines(self, _symbol: str) -> list[int]:
+            return closes
+
+        def book_top(self, _symbol: str) -> tuple[int, int]:
+            return 100, 100
+
+        def depth_notional(self, _symbol: str) -> tuple[int, int]:
+            return 1, 2
+
+    cfg = Config(
+        symbols=("BTCUSDT",),
+        paper_cash_micro=20_000_000,
+        interval_sec=60,
+        max_positions=1,
+        alloc_bps=10_000,
+        min_notional_micro=1_000_000,
+        rsi_buy=35,
+        stop_bps=350,
+        take_bps=700,
+        trail_arm_bps=300,
+        trail_gap_bps=200,
+        live=False,
+        mode="rsi",
+        taker_bps=5,
+        daily_loss_bps=500,
+        stop_cooldown_sec=900,
+        symbol_lock=True,
+        api_key="",
+        api_secret="",
+        entries=True,
+    )
+    book = Book(cash_micro=20_000_000, positions=[], realized_micro=0)
+    opened, skipped = _open_positions(cfg, _Book(), book, tmp_path / "touch.json", "book", 10**12)
+    assert opened == 0 and skipped == 1 and book.positions == []
+
+
+def test_a_far_book_level_is_not_the_next_trade() -> None:
+    from spotbot.mexc import depth_notionals
+
+    near = depth_notionals(
+        {"bids": [["100", "1"]], "asks": [["100.01", "1"]], "lastUpdateId": 1},
+        "BTCUSDT",
+    )
+    both = depth_notionals(
+        {"bids": [["100", "1"], ["90", "5"]], "asks": [["100.01", "1"], ["110", "5"]], "lastUpdateId": 1},
+        "BTCUSDT",
+    )
+    assert both == near
+
+
+def test_a_jumped_close_stays_in_the_tape_and_stops() -> None:
+    from spotbot.replay import replay_closes
+
+    closes = [100_000_000] * 40 + [90_000_000, 98_000_000, 80_000_000]
+    opens = [100_000_000] * 40 + [90_000_000, 98_000_000, 97_000_000]
+    result = replay_closes(
+        closes,
+        cash_micro=1_000_000_000,
+        alloc_bps=10_000,
+        taker_bps=5,
+        rsi_buy=35,
+        stop_bps=350,
+        take_bps=700,
+        trail_arm_bps=10_000,
+        trail_gap_bps=10_000,
+        min_notional_micro=1,
+        opens=opens,
+    )
+    assert result.trades == 1
+    assert result.fills[0].exit_micro * 10_000 < result.fills[0].entry_micro * 9_000
+
+
 def test_replay_stop_is_negative_after_fees() -> None:
-    # Long flat stretch, one dip under the band, then a further drop through the stop.
-    closes = [100_000_000] * 44
-    closes += [90_000_000, 90_000_000]
-    closes += [80_000_000] * 6
+    # Flat stretch, one close under the band, a reclaim, then a drop through the stop.
+    closes = [100_000_000] * 40
+    closes += [90_000_000, 98_000_000, 97_000_000]
+    closes += [93_000_000] * 6
     result = replay_closes(
         closes,
         cash_micro=1_000_000_000,
@@ -3124,6 +3462,53 @@ def test_replay_stop_is_negative_after_fees() -> None:
     )
     assert result.trades >= 1
     assert result.net_micro < 0
+    untouched = replay_closes(
+        closes,
+        cash_micro=1_000_000_000,
+        alloc_bps=10_000,
+        taker_bps=5,
+        rsi_buy=100,
+        stop_bps=350,
+        take_bps=700,
+        trail_arm_bps=10_000,
+        trail_gap_bps=10_000,
+        min_notional_micro=1,
+        entry_from=len(closes),
+    )
+    assert untouched.trades == 0
+    assert untouched.net_micro == 0
+    held = replay_closes(
+        closes,
+        cash_micro=1_000_000_000,
+        alloc_bps=10_000,
+        taker_bps=5,
+        rsi_buy=100,
+        stop_bps=350,
+        take_bps=700,
+        trail_arm_bps=10_000,
+        trail_gap_bps=10_000,
+        min_notional_micro=1,
+        cooldown_bars=10**6,
+        lookback_bars=10**6,
+        lock_bars=10**6,
+        lock_count=2,
+    )
+    assert held.trades >= 1
+    assert held.trades <= result.trades
+    assert held.net_micro < 0
+    from spotbot.replay import _fill_price
+
+    assert _fill_price([10, 20], [10, 99], 0) == 20
+    assert _fill_price(None, [10, 99], 0) == 99
+    from spotbot.mexc import MexcError, _join_klines
+
+    assert len(_join_klines([[1, "a"]], [[2, "b"]], "BTCUSDT")) == 2
+    try:
+        _join_klines([[2, "a"]], [[2, "b"]], "BTCUSDT")
+    except MexcError as exc:
+        assert "short" in str(exc)
+    else:
+        raise AssertionError("a page that does not move earlier must not extend the tape")
 
 
 def test_split_keeps_every_satoshi() -> None:
@@ -3651,6 +4036,15 @@ def test_ten_fail_closed_checks() -> None:
     row = [1_000, "1", "1.1", "0.9", "1", "1", 2_000, "10"]
     later = [3_000, "1", "1.1", "0.9", "1", "1", 4_000, "10"]
     assert len(parse_klines("BTCUSDT", [row, later])) == 2
+    quiet = [2_000, "1", "1.1", "0.9", "1", "0", 3_000, "0"]
+    after = [3_000, "1", "1.1", "0.9", "1", "1", 4_000, "10"]
+    assert len(parse_klines("BTCUSDT", [row, quiet, after])) == 2
+    live = [1_700_000_000_000, "1", "1", "1", "1", "1", 1_700_000_300_000, "1"]
+    live_next = [1_700_000_300_000, "1", "1", "1", "1", "1", 1_700_000_600_000, "1"]
+    assert len(parse_klines("BTCUSDT", [live, live_next], 300_000)) == 2
+    old = [1_700_000_000_000, "1", "1", "1", "1", "1", 1_700_000_299_999, "1"]
+    old_next = [1_700_000_300_000, "1", "1", "1", "1", "1", 1_700_000_599_999, "1"]
+    assert len(parse_klines("BTCUSDT", [old, old_next], 300_000)) == 2
     overlap = [1_500, "1", "1.1", "0.9", "1", "1", 2_500, "10"]
     try:
         parse_klines("BTCUSDT", [row, overlap])
@@ -4464,6 +4858,31 @@ def test_ops_page_answers_on_its_own_port(tmp_path) -> None:
     assert "Спот-бот" in body
     assert json.loads(status)["bind"] == "127.0.0.1:19281"
     assert "18180-18182" in status
+
+
+def test_replay_signal_uses_the_cycle_window() -> None:
+    import inspect
+
+    from spotbot.mexc import KLINE_LIMIT, MexcClient
+    from spotbot.replay import _signal_closes
+
+    assert inspect.signature(MexcClient.klines).parameters["limit"].default == KLINE_LIMIT
+    closes = list(range(1, 400))
+    window = _signal_closes(closes, len(closes) - 1)
+    assert len(window) == KLINE_LIMIT - 1
+    assert window[-1] == closes[-1]
+    assert window[0] == closes[-(KLINE_LIMIT - 1)]
+
+
+def test_klines_returns_the_close_not_the_quote_volume() -> None:
+    from spotbot.mexc import MexcClient
+
+    client = MexcClient("", "")
+    client.ohlcv = lambda *_args, **_kwargs: [  # type: ignore[method-assign]
+        (10, 12, 8, 11, 5_000_000),
+        (10, 12, 8, 14, 9_000_000),
+    ]
+    assert client.klines("BTCUSDT", "5m", 80) == [11, 14]
 
 
 def test_lift_candle_replay_loses_on_the_stop() -> None:

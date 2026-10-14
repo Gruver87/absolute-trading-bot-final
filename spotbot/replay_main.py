@@ -33,7 +33,10 @@ def main(argv: list[str] | None = None) -> int:
     symbols = list(sleeve_symbols()) if args.sleeves else [args.symbol.upper()]
     later_rsi: list[int] = []
     later_lift: list[int] = []
+    earlier_rsi: list[int] = []
+    earlier_lift: list[int] = []
     zero_fee: list[str] = []
+    left_out: list[str] = []
     client = MexcClient()
     for index, symbol in enumerate(symbols):
         if index:
@@ -41,16 +44,28 @@ def main(argv: list[str] | None = None) -> int:
         try:
             rule = client.symbol_rule(symbol)
             if not rule.tradable or rule.base_step_atoms <= 0:
-                print(f"replay refused: {symbol} {rule.refuse_reason or 'no lot'}", file=sys.stderr)
-                return 1
+                reason = rule.refuse_reason or "no lot"
+                if not args.sleeves:
+                    print(f"replay refused: {symbol} {reason}", file=sys.stderr)
+                    return 1
+                left_out.append(symbol)
+                print(f"{symbol}: {reason}; left out of the median")
+                continue
             rows = client.ohlcv(symbol, "5m", args.limit)
         except MexcRateLimit as exc:
             print(f"replay stopped on rate limit: {exc}", file=sys.stderr)
             print("median refused: the tape is incomplete")
             return 1
         except (MexcError, RuleError) as exc:
-            print(f"replay failed: {symbol} {exc}", file=sys.stderr)
-            return 1
+            if not args.sleeves:
+                print(f"replay failed: {symbol} {exc}", file=sys.stderr)
+                return 1
+            left_out.append(symbol)
+            print(f"{symbol}: {exc}; left out of the median")
+            continue
+        if len(rows) >= 2:
+            rows = rows[:-1]
+        opens = [row[0] for row in rows]
         closes = [row[3] for row in rows]
         bars = [(row[1], row[2], row[3], row[4]) for row in rows]
         step = rule.base_step_atoms
@@ -58,23 +73,43 @@ def main(argv: list[str] | None = None) -> int:
         if taker == 0:
             zero_fee.append(symbol)
             print(f"{symbol}: exchange reported taker 0; left out of the median")
+        keep = taker > 0
         if len(rows) >= 160:
             cut = holdout_cut(len(rows))
-            _run_pair("earlier", symbol, closes[:cut], bars[:cut], step, rule.price_tick, taker, median=False)
-            rsi_net, lift_net = _run_pair(
-                "later", symbol, closes[cut:], bars[cut:], step, rule.price_tick, taker, median=taker > 0
+            e_rsi, e_lift = _run_pair(
+                "earlier", symbol, closes[:cut], bars[:cut], step, rule.price_tick, taker, median=keep, opens=opens[:cut]
             )
+            rsi_net, lift_net = _run_pair(
+                "later",
+                symbol,
+                closes,
+                bars,
+                step,
+                rule.price_tick,
+                taker,
+                median=keep,
+                entry_from=cut,
+                opens=opens,
+            )
+            if e_rsi is not None:
+                earlier_rsi.append(e_rsi)
+            if e_lift is not None:
+                earlier_lift.append(e_lift)
             if rsi_net is not None:
                 later_rsi.append(rsi_net)
             if lift_net is not None:
                 later_lift.append(lift_net)
         else:
-            _run_pair("full", symbol, closes, bars, step, rule.price_tick, taker, median=False)
+            _run_pair("full", symbol, closes, bars, step, rule.price_tick, taker, median=False, opens=opens)
     if args.sleeves:
+        _print_median("earlier rsi", earlier_rsi)
+        _print_median("earlier lift-candles", earlier_lift)
         _print_median("later rsi", later_rsi)
         _print_median("later lift-candles", later_lift)
         if zero_fee:
             print("zero taker left out: " + ",".join(zero_fee))
+        if left_out:
+            print("no lot left out: " + ",".join(left_out))
         print("median is closed trades plus the open mark; a positive median does not rest a limit or open the book socket")
     elif later_rsi or later_lift:
         print("both slices use the same fixed rule; a positive slice does not rest a limit or open the book socket")
@@ -92,11 +127,15 @@ def _run_pair(
     price_tick: int,
     taker_bps: int,
     median: bool,
+    entry_from: int = 0,
+    opens: list[int] | None = None,
 ) -> tuple[int | None, int | None]:
     cash = parse_micro("1000")
     floor = parse_micro("3")
+    traded = closes[entry_from:]
+    traded_bars = bars[entry_from:]
     rsi_net: int | None = None
-    if _grid_ok(closes, price_tick, 350):
+    if _grid_ok(traded, price_tick, 350):
         result = replay_closes(
         closes,
         cash_micro=cash,
@@ -110,15 +149,21 @@ def _run_pair(
         min_notional_micro=floor,
         base_step_atoms=base_step_atoms,
         slip_bps=SPREAD_SLIP_BPS,
+        entry_from=entry_from,
+        opens=opens,
+        cooldown_bars=3,
+        lookback_bars=288,
+        lock_bars=48,
+        lock_count=3,
         )
-        _print_result(f"rsi:{label}", symbol, len(closes), result, taker_bps)
-        _print_hold(label, symbol, closes, result, taker_bps, base_step_atoms, floor)
+        _print_result(f"rsi:{label}", symbol, len(traded), result, taker_bps)
+        _print_hold(label, symbol, traded, result, taker_bps, base_step_atoms, floor)
         if median:
             rsi_net = _account(result)
     else:
         print(f"rsi:{label} symbol={symbol} refused: price step is wider than the 350 bps stop")
     lift_net: int | None = None
-    if _grid_ok([bar[2] for bar in bars], price_tick, 150):
+    if _grid_ok([bar[2] for bar in traded_bars], price_tick, 150):
         lift = replay_lift_bars(
         bars,
         cash_micro=cash,
@@ -127,8 +172,14 @@ def _run_pair(
         min_notional_micro=floor,
         base_step_atoms=base_step_atoms,
         slip_bps=SPREAD_SLIP_BPS,
+        entry_from=entry_from,
+        opens=opens,
+        cooldown_bars=3,
+        lookback_bars=288,
+        lock_bars=48,
+        lock_count=3,
         )
-        _print_result(f"lift-candles:{label}", symbol, len(bars), lift, taker_bps)
+        _print_result(f"lift-candles:{label}", symbol, len(traded_bars), lift, taker_bps)
         if median:
             lift_net = _account(lift)
     else:

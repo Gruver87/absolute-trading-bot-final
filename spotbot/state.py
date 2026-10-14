@@ -214,6 +214,8 @@ def load_book(path: Path, paper_cash_micro: int) -> Book:
         raise LedgerError("paper cash is not a non-negative integer")
     if not path.exists():
         return Book(cash_micro=paper_cash_micro, positions=[], realized_micro=0, fees_micro=0)
+    if not path.is_file():
+        raise LedgerError("book is not a file")
     try:
         if path.stat().st_size > _MAX_BOOK_BYTES:
             raise LedgerError("book file is too large")
@@ -331,6 +333,8 @@ def _guard_day_ok(day: str) -> None:
         raise LedgerError("guard day is not a date")
     if day == "":
         return
+    if len(day) > 10:
+        raise LedgerError("guard day is not a date")
     from datetime import date, datetime, timezone
 
     try:
@@ -547,6 +551,8 @@ def hold_ledger(directory: Path) -> Iterator[None]:
     """Keep this paper or live directory. A second process does not trade over it."""
     if not isinstance(directory, Path):
         raise LedgerError("ledger directory is not a path")
+    if directory.exists() and not directory.is_dir():
+        raise LedgerError("ledger directory is not a directory")
     directory.mkdir(parents=True, exist_ok=True)
     handle = (directory / ".ledger.lock").open("a+b")
     try:
@@ -569,6 +575,8 @@ def write_atomic(path: Path, text: str) -> None:
     """Replace the file only after the new bytes are flushed. A crash keeps the previous file."""
     if not isinstance(text, str) or len(text) > 1_000_000:
         raise LedgerError("file is too large")
+    if path.exists() and not path.is_file():
+        raise LedgerError("path is not a file")
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     with tmp.open("w", encoding="utf-8", newline="\n") as handle:
