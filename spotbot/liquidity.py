@@ -24,7 +24,7 @@ def _fit(value: object) -> bool:
 
 def volume_ratio_bps(quote_volumes: list[int]) -> int | None:
     """Last closed bar versus the median of the 12 bars before it."""
-    if len(quote_volumes) < 14 or any(not _fit(item) for item in quote_volumes):
+    if not isinstance(quote_volumes, list) or len(quote_volumes) < 14 or any(not _fit(item) for item in quote_volumes):
         return None
     closed = quote_volumes[-2]
     prior = sorted(quote_volumes[-14:-2])

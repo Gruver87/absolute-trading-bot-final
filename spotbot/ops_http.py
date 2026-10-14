@@ -125,7 +125,9 @@ def _show_book(loaded: object) -> object:
     if not isinstance(view, dict) or not isinstance(loaded, dict):
         return view
     positions = view.get("positions")
-    if not isinstance(positions, list):
+    if not isinstance(positions, list) or len(positions) > 8:
+        if isinstance(positions, list):
+            view["positions"] = "unreadable"
         return view
     from spotbot.money import format_price
 
@@ -135,18 +137,34 @@ def _show_book(loaded: object) -> object:
             continue
         for key in ("entry_micro", "peak_micro"):
             raw = pos.get(key)
-            if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0 or raw > 10**24:
+            if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0 or raw >= 10**24:
                 pos[key] = "unreadable"
                 continue
-            pos[key] = format_price(raw * 1_000_000 if legacy else raw)
+            shown = raw * 1_000_000 if legacy else raw
+            if shown >= 10**24:
+                pos[key] = "unreadable"
+                continue
+            pos[key] = format_price(shown)
     return view
 
 
-def _public(value: object) -> object:
+def _public(value: object, depth: int = 0) -> object:
+    if depth >= 8:
+        return "unreadable"
+    if isinstance(value, str):
+        return value if len(value) <= 180 else value[:180]
     if isinstance(value, dict):
-        return {key: _public(item) for key, item in value.items() if isinstance(key, str) and not _hidden(key)}
+        if len(value) > 64:
+            return "unreadable"
+        return {
+            key: _public(item, depth + 1)
+            for key, item in value.items()
+            if isinstance(key, str) and not _hidden(key)
+        }
     if isinstance(value, list):
-        return [_public(item) for item in value]
+        if len(value) > 32:
+            return "unreadable"
+        return [_public(item, depth + 1) for item in value]
     return value
 
 
@@ -176,7 +194,7 @@ def _heartbeat(data_dir: Path) -> dict[str, object] | None:
     if not isinstance(loaded, dict):
         return None
     stamp = loaded.get("at")
-    if not isinstance(stamp, str) or not stamp:
+    if not isinstance(stamp, str) or not stamp or len(stamp) > 40:
         return None
     from datetime import datetime
 
@@ -187,10 +205,10 @@ def _heartbeat(data_dir: Path) -> dict[str, object] | None:
         age = int((datetime.now().astimezone() - then).total_seconds())
     except (TypeError, ValueError, OverflowError):
         return None
-    if age < 0:
+    if age < 0 or age > 86_400 * 366:
         return None
     book = loaded.get("book")
-    if not isinstance(book, str):
+    if not isinstance(book, str) or len(book) > 32:
         book = ""
     return {"at": stamp, "book": book, "age_sec": age}
 
@@ -205,7 +223,13 @@ def _quotes(data_dir: Path) -> dict[str, object]:
     except OSError:
         return {}
     loaded = _read_json(path)
-    return loaded if isinstance(loaded, dict) else {}
+    if not isinstance(loaded, dict) or len(loaded) > 32:
+        return {}
+    return {
+        key: _public(value)
+        for key, value in loaded.items()
+        if isinstance(key, str) and len(key) <= 32 and isinstance(_public(value), (dict, str, int))
+    }
 
 
 def _tail_text(path: Path, limit: int) -> str:
@@ -237,7 +261,9 @@ def _events(data_dir: Path) -> list[object]:
         except json.JSONDecodeError:
             continue
         if isinstance(item, dict):
-            rows.append(_public(item))
+            shown = _public(item)
+            if isinstance(shown, dict):
+                rows.append(shown)
     return rows[-50:]
 
 
@@ -248,7 +274,7 @@ def _log_tail(path: Path) -> list[str]:
         lines = _tail_text(path, 65_536).splitlines()
     except OSError:
         return []
-    kept = [line for line in lines if _safe_log(line)]
+    kept = [line if len(line) <= 240 else line[:240] for line in lines if _safe_log(line)]
     return kept[-40:]
 
 

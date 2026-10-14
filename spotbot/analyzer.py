@@ -30,7 +30,14 @@ def _load() -> ctypes.CDLL | None:
         if not path.exists():
             continue
         lib = ctypes.CDLL(str(path))
-        lib.sb_score.argtypes = [ctypes.c_int32] * 6
+        lib.sb_score.argtypes = [
+            ctypes.c_int32,
+            ctypes.c_int32,
+            ctypes.c_int32,
+            ctypes.c_int32,
+            ctypes.c_int64,
+            ctypes.c_int64,
+        ]
         lib.sb_score.restype = ctypes.c_int32
         _LIB = lib
         LOG.info("analyzer backend=rust %s", path.name)
@@ -50,6 +57,10 @@ def score(
     """Return 0 when the setup is refused, else a score in basis points of confidence."""
     nums = (volume_bps, close_pos_bps, oracle_dev_bps, rsi_value, bid, ask)
     if any(isinstance(item, bool) or not isinstance(item, int) for item in nums):
+        return 0
+    if any(item <= -(2**31) or item >= 2**31 for item in nums[:4]):
+        return 0
+    if bid <= -(2**63) or bid >= 2**63 or ask <= -(2**63) or ask >= 2**63:
         return 0
     lib = _load()
     if lib is not None:
@@ -76,6 +87,10 @@ def _score_python(
 ) -> int:
     nums = (volume_bps, close_pos_bps, oracle_dev_bps, rsi_value, bid, ask)
     if any(isinstance(item, bool) or not isinstance(item, int) for item in nums):
+        return 0
+    if any(item <= -(2**31) or item >= 2**31 for item in nums[:4]):
+        return 0
+    if bid <= -(2**63) or bid >= 2**63 or ask <= -(2**63) or ask >= 2**63:
         return 0
     if bid <= 0 or ask < 0 or ask >= bid:
         return 0

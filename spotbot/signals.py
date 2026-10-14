@@ -96,14 +96,16 @@ class Entry:
 
 def closed_prices(prices: list[int]) -> list[int]:
     """Drop the forming bar. MEXC klines end with the candle that is still open."""
-    if len(prices) < 2:
+    if not isinstance(prices, list) or len(prices) < 2:
+        return []
+    if any(isinstance(price, bool) or not isinstance(price, int) or price <= 0 or price >= 10**24 for price in prices):
         return []
     return prices[:-1]
 
 
 def entry_signal(symbol: str, prices: list[int], rsi_buy: int) -> Entry | None:
     """BUY only on oversold RSI confirmed by Bollinger or a MACD buy cross."""
-    if isinstance(rsi_buy, bool) or not isinstance(rsi_buy, int) or any(isinstance(price, bool) or not isinstance(price, int) or price <= 0 for price in prices):
+    if not isinstance(symbol, str) or isinstance(rsi_buy, bool) or not isinstance(rsi_buy, int) or any(isinstance(price, bool) or not isinstance(price, int) or price <= 0 for price in prices):
         return None
     value = rsi(prices)
     if value is None or value >= rsi_buy:

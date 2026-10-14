@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import os
-import re
 from dataclasses import dataclass
 
 from spotbot.money import MoneyError, parse_micro
-
-_SYMBOL = re.compile(r"^[A-Z0-9]{2,10}USDT$")
+from spotbot.state import usdt_symbol_ok
 
 
 class ConfigError(RuntimeError):
@@ -45,11 +43,11 @@ class Config:
 
 def require_cycle_config(cfg: Config) -> None:
     """Refuse a config the cycle must not trade. Same bounds as the env loader."""
-    if not cfg.symbols or len(set(cfg.symbols)) != len(cfg.symbols):
+    if not cfg.symbols or len(cfg.symbols) > 14 or len(set(cfg.symbols)) != len(cfg.symbols):
         raise ConfigError("symbols are empty or repeated")
     for symbol in cfg.symbols:
-        if not isinstance(symbol, str) or _SYMBOL.fullmatch(symbol) is None:
-            raise ConfigError(f"{symbol} is not a USDT pair")
+        if not isinstance(symbol, str) or len(symbol) > 32 or not usdt_symbol_ok(symbol):
+            raise ConfigError("symbols are not USDT pairs")
     if not isinstance(cfg.live, bool) or not isinstance(cfg.symbol_lock, bool) or not isinstance(cfg.entries, bool):
         raise ConfigError("live, entries, and the pair lock must be on or off")
     if not isinstance(cfg.api_key, str) or not isinstance(cfg.api_secret, str):
@@ -105,6 +103,10 @@ def require_cycle_config(cfg: Config) -> None:
         raise ConfigError("cash must be >= 0 and the minimum order > 0")
     if min(cfg.stop_bps, cfg.take_bps, cfg.trail_arm_bps, cfg.trail_gap_bps) <= 0:
         raise ConfigError("exit percents must be positive")
+    if max(cfg.stop_bps, cfg.take_bps, cfg.trail_arm_bps, cfg.trail_gap_bps) > 10_000:
+        raise ConfigError("exit percents are out of range")
+    if cfg.paper_cash_micro >= 10**24 or cfg.min_notional_micro >= 10**24:
+        raise ConfigError("cash is too large")
 
 
 def _env_int(name: str, default: str, low: int, high: int) -> int:
@@ -150,8 +152,8 @@ def load_config(live_flag: bool, mode: str | None = None) -> Config:
     if len(set(symbols)) != len(symbols):
         raise ConfigError("SPOT_SYMBOLS has a duplicate")
     for symbol in symbols:
-        if _SYMBOL.fullmatch(symbol) is None:
-            raise ConfigError(f"{symbol} is not a USDT pair")
+        if len(symbol) > 32 or not usdt_symbol_ok(symbol):
+            raise ConfigError("SPOT_SYMBOLS is not a USDT pair")
     interval = _env_int("SPOT_INTERVAL_SEC", "60", 15, 86_400)
     env_live = os.environ.get("SPOT_LIVE", "0") == "1"
     live = live_flag and env_live

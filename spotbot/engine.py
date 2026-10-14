@@ -20,6 +20,7 @@ from spotbot.oracle import ahead_exit, cheapest_first, deviation_bps, entry_allo
 from spotbot.mexc import (
     MexcClient,
     MexcError,
+    MexcOrderAccepted,
     MexcRateLimit,
     clock_allows,
     executed_fill,
@@ -65,6 +66,7 @@ from spotbot.state import (
     record_sell_fill,
     remember_pending,
     save_book,
+    usdt_symbol_ok,
 )
 
 LOG = logging.getLogger("spotbot")
@@ -91,20 +93,21 @@ def run_cycle(
     client.forget_rules()
     book = load_book(path, cfg.paper_cash_micro)
     bind_ledger(book, cfg.live)
-    _roll_guard(book)
     name = book_name or path.stem
-    clock_ok = _clock_ok(client) if cfg.live else True
-    other_pending = sibling_pending(sibling_paths) if cfg.live else None
-    known_order = other_pending is not None and " pending " in other_pending
-    if other_pending:
-        LOG.warning("sibling book blocks entries: %s", other_pending)
-    orders_allowed = clock_ok and not known_order
     exits, entries, skipped = 0, 0, 0
     marks: dict[str, int] = {}
     unmarked: tuple[str, ...] = ()
     pending_problem = None
     conflict = None
+    orders_allowed = False
     try:
+        _roll_guard(book)
+        clock_ok = _clock_ok(client) if cfg.live else True
+        other_pending = sibling_pending(sibling_paths) if cfg.live else None
+        known_order = other_pending is not None and " pending " in other_pending
+        if other_pending:
+            LOG.warning("sibling book blocks entries: %s", other_pending)
+        orders_allowed = clock_ok and not known_order
         exits, marks, unmarked = _close_positions(cfg, client, book, path, name, orders_allowed)
         pending_problem = _resolve_pending(client, book, path) if cfg.live and book.pending_client_id else None
         exit_fees = _exit_fees(client, book)
@@ -149,8 +152,9 @@ def run_cycle(
         LOG.warning("rate limit, cycle stopped and the book is kept: %s", exc)
     else:
         limited = None
-    save_book(path, book)
-    note_heartbeat(ops_root(path), name)
+    finally:
+        save_book(path, book)
+        note_heartbeat(ops_root(path), name)
     LOG.info(
         "cash=%s realized=%s fees=%s positions=%s exits=%s entries=%s skipped=%s live=%s",
         format_usdt(book.cash_micro),
@@ -412,8 +416,8 @@ def _close_positions(
                 LOG.warning("balance read failed, sell kept: %s", exc)
                 kept.append(pos)
                 continue
-            if rule.base_asset != pos.symbol[:-4] or not pos.symbol.endswith("USDT"):
-                LOG.warning("sell kept, %s base asset is %s", pos.symbol, rule.base_asset or "missing")
+            if not _base_matches(pos.symbol, rule.base_asset):
+                LOG.warning("sell kept, %s base asset does not match", pos.symbol)
                 kept.append(pos)
                 continue
             if not base_is_free(free_bases.get(rule.base_asset, 0), sell_atoms):
@@ -452,6 +456,11 @@ def _close_positions(
                 fill = client.market_sell_base(pos.symbol, sell_atoms, client_id)
             except MexcRateLimit:
                 raise
+            except MexcOrderAccepted as exc:
+                _keep_exchange_ack(book, path, exc)
+                LOG.warning("sell failed, position kept: %s", exc)
+                kept.append(pos)
+                continue
             except MexcError as exc:
                 LOG.warning("sell failed, position kept: %s", exc)
                 kept.append(pos)
@@ -508,14 +517,14 @@ def _close_positions(
             mark_stop_cooldown(book, reason, cfg.stop_cooldown_sec, pos.symbol, cfg.stop_lock_count, cfg.stop_lock_sec)
             save_book(path, book)
             closed += 1
-            LOG.info("exit %s %s price=%s", reason, pos.symbol, format_price(price))
+            LOG.info("exit %s %s price=%s", reason, pos.symbol, _shown_price(price))
             note_event(
                 data_dir,
                 book=book_name,
                 kind="exit",
                 symbol=pos.symbol,
                 reason=reason,
-                price=format_price(price),
+                price=_shown_price(price),
             )
             continue
         try:
@@ -528,8 +537,8 @@ def _close_positions(
             LOG.warning("rules %s, paper sell kept: %s", pos.symbol, exc)
             kept.append(pos)
             continue
-        if rule.base_asset != pos.symbol[:-4] or not pos.symbol.endswith("USDT"):
-            LOG.warning("paper sell kept, %s base asset is %s", pos.symbol, rule.base_asset or "missing")
+        if not _base_matches(pos.symbol, rule.base_asset):
+            LOG.warning("paper sell kept, %s base asset does not match", pos.symbol)
             kept.append(pos)
             continue
         sell_atoms = round_base_atoms(pos.base_atoms, step)
@@ -571,15 +580,16 @@ def _close_positions(
         if any(item.symbol == pos.symbol for item in book.positions):
             kept.append(pos)
         mark_stop_cooldown(book, reason, cfg.stop_cooldown_sec, pos.symbol, cfg.stop_lock_count, cfg.stop_lock_sec)
+        save_book(path, book)
         closed += 1
-        LOG.info("exit %s %s price=%s", reason, pos.symbol, format_price(price))
+        LOG.info("exit %s %s price=%s", reason, pos.symbol, _shown_price(price))
         note_event(
             data_dir,
             book=book_name,
             kind="exit",
             symbol=pos.symbol,
             reason=reason,
-            price=format_price(price),
+            price=_shown_price(price),
         )
     book.positions = kept
     if not unmarked:
@@ -902,6 +912,10 @@ def _try_buy(
             fill = client.market_buy_quote(symbol, spend, client_id)
         except MexcRateLimit:
             raise
+        except MexcOrderAccepted as exc:
+            _keep_exchange_ack(book, path, exc)
+            LOG.warning("buy failed, left pending: %s", exc)
+            return False
         except MexcError as exc:
             LOG.warning("buy failed, left pending: %s", exc)
             return False
@@ -958,9 +972,9 @@ def _try_buy(
             "entry %s %s price=%s debit=%s fee=%s",
             reason,
             symbol,
-            format_price(book.positions[-1].entry_micro if book.positions else 0),
-            format_usdt(fill.quote_micro + fee),
-            format_usdt(fee),
+            _shown_price(book.positions[-1].entry_micro if book.positions else 0),
+            _shown_usdt(fill.quote_micro + fee),
+            _shown_usdt(fee),
         )
         note_event(
             ops_root(path),
@@ -968,7 +982,7 @@ def _try_buy(
             kind="entry",
             symbol=symbol,
             reason=reason,
-            price=format_price(book.positions[-1].entry_micro if book.positions else 0),
+            price=_shown_price(book.positions[-1].entry_micro if book.positions else 0),
         )
         return True
     checked = _recheck_ask(client, symbol, price, cfg.spread_bps, rule.price_tick, _risk(cfg)[0])
@@ -996,12 +1010,13 @@ def _try_buy(
             reason=reason,
         )
     )
+    save_book(path, book)
     LOG.info(
         "entry %s %s price=%s debit=%s fee_bps=%s",
         reason,
         symbol,
-        format_price(ask),
-        format_usdt(debit),
+        _shown_price(ask),
+        _shown_usdt(debit),
         rule.taker_bps,
     )
     note_event(
@@ -1010,9 +1025,26 @@ def _try_buy(
         kind="entry",
         symbol=symbol,
         reason=reason,
-        price=format_price(ask),
+        price=_shown_price(ask),
     )
     return True
+
+
+def _keep_exchange_ack(book: Book, path: Path, exc: MexcOrderAccepted) -> None:
+    """The order was accepted. Its id stays on the book so a missing lookup cannot forget it."""
+    order_id = exc.exchange_order_id
+    if not exchange_order_id_ok(order_id) or book.pending_exchange_order_id:
+        return
+    book.pending_exchange_order_id = order_id
+    save_book(path, book)
+
+
+def _note_miss(book: Book) -> None:
+    """Count one absence. The count stops at 1000 so the book can still be saved."""
+    if not isinstance(book.pending_misses, int) or isinstance(book.pending_misses, bool) or book.pending_misses < 0:
+        book.pending_misses = 0
+    elif book.pending_misses < 1_000:
+        book.pending_misses += 1
 
 
 def _resolve_pending(client: MexcClient, book: Book, path: Path) -> str | None:
@@ -1023,7 +1055,7 @@ def _resolve_pending(client: MexcClient, book: Book, path: Path) -> str | None:
         raise
     except MexcError as exc:
         if order_missing(str(exc)):
-            book.pending_misses += 1
+            _note_miss(book)
             has_fill = any(pos.client_order_id == book.pending_client_id for pos in book.positions)
             if pending_gone(
                 book.pending_misses,
@@ -1037,8 +1069,8 @@ def _resolve_pending(client: MexcClient, book: Book, path: Path) -> str | None:
                 return None
             save_book(path, book)
             LOG.warning("pending order is not visible yet, entries stay blocked")
-            return str(exc)
-        return str(exc)
+            return _short(str(exc))
+        return _short(str(exc))
     book.pending_misses = 0
     if not order_is_ours(order, book.pending_symbol, book.pending_side, book.pending_client_id):
         LOG.warning("pending order response is not %s %s", book.pending_side, book.pending_symbol)
@@ -1049,9 +1081,9 @@ def _resolve_pending(client: MexcClient, book: Book, path: Path) -> str | None:
         except MexcRateLimit:
             raise
         except MexcError as exc:
-            return str(exc)
+            return _short(str(exc))
         if got is None:
-            return f"{book.pending_side} {book.pending_symbol} status {order.get('status')}"
+            return _short(f"{book.pending_side} {book.pending_symbol} status {order.get('status')}")
         base_atoms, quote_micro, price_micro = got
         over = _over_request(book, base_atoms, quote_micro)
         if over:
@@ -1059,14 +1091,14 @@ def _resolve_pending(client: MexcClient, book: Book, path: Path) -> str | None:
         if not _apply_progress(client, book, order, base_atoms, quote_micro, price_micro):
             return "pending fill was not recorded"
         save_book(path, book)
-        return f"{book.pending_side} {book.pending_symbol} status {order.get('status')}"
+        return _short(f"{book.pending_side} {book.pending_symbol} status {order.get('status')}")
     if not order_filled(order):
         try:
             got = executed_fill(order)
         except MexcRateLimit:
             raise
         except MexcError as exc:
-            return str(exc)
+            return _short(str(exc))
         if got is None:
             if (
                 book.pending_applied_atoms
@@ -1087,7 +1119,7 @@ def _resolve_pending(client: MexcClient, book: Book, path: Path) -> str | None:
         except MexcRateLimit:
             raise
         except MexcError as exc:
-            return str(exc)
+            return _short(str(exc))
     over = _over_request(book, base_atoms, quote_micro)
     if over:
         return over
@@ -1191,7 +1223,7 @@ def _order_fees(
     client: MexcClient, symbol: str, order_id: str, side: str
 ) -> tuple[int, int, int, int] | None:
     """USDT fee and base-asset fee. None when the fee cannot be priced."""
-    if not isinstance(symbol, str) or not symbol.endswith("USDT") or len(symbol) <= 4:
+    if not usdt_symbol_ok(symbol):
         LOG.warning("fee asset unknown for %s", symbol)
         return None
     try:
@@ -1206,6 +1238,8 @@ def _order_fees(
 
 def sibling_pending(paths: tuple[Path, ...]) -> str | None:
     """A client id on another book of this account. One exchange order at a time."""
+    if len(paths) > 8:
+        return "too many sibling books"
     for path in paths:
         if not path.exists():
             continue
@@ -1220,6 +1254,8 @@ def sibling_pending(paths: tuple[Path, ...]) -> str | None:
 
 def _sibling_positions(paths: tuple[Path, ...]) -> list[tuple[str, int]]:
     """Open coins in the other books. Those files are the source of truth."""
+    if len(paths) > 8:
+        raise LedgerError("too many sibling books")
     rows: list[tuple[str, int]] = []
     for path in paths:
         if not path.exists():
@@ -1238,12 +1274,12 @@ def _account_conflict(client: MexcClient, book: Book, sibling_paths: tuple[Path,
     except MexcRateLimit:
         raise
     except MexcError as exc:
-        return str(exc)
+        return _short(str(exc))
     positions = [(pos.symbol, pos.base_atoms) for pos in book.positions]
     try:
         elsewhere = _sibling_positions(sibling_paths)
     except LedgerError as exc:
-        return str(exc)
+        return _short(str(exc))
     return inventory_mismatch(positions, bases, elsewhere)
 
 
@@ -1311,6 +1347,8 @@ def mark_stop_cooldown(
     if isinstance(seconds, bool):
         seconds = 86_400
     if isinstance(seconds, int) and not isinstance(seconds, bool) and seconds > 0:
+        if seconds > 86_400:
+            seconds = 86_400
         book.cooldown_until = _now_sec() + seconds
     if symbol:
         note_pair_stop(book, symbol, _now_sec(), lock_count, lock_sec)
@@ -1332,7 +1370,10 @@ def open_loss_micro(
             return 2**62
         if isinstance(price, bool) or isinstance(pos.base_atoms, bool) or not isinstance(pos.base_atoms, int) or price <= 0 or pos.base_atoms <= 0:
             continue
-        gross = notional_micro(pos.base_atoms, price)
+        try:
+            gross = notional_micro(pos.base_atoms, price)
+        except MoneyError:
+            return 2**62
         if taker_bps is None:
             value = gross
         else:
@@ -1343,8 +1384,12 @@ def open_loss_micro(
             if credit < 0 or fee < 0 or credit + fee != gross:
                 continue
             value = credit
+        if isinstance(pos.quote_micro, int) and not isinstance(pos.quote_micro, bool) and pos.quote_micro >= 10**24:
+            return 2**62
         if value < pos.quote_micro:
             loss += pos.quote_micro - value
+            if loss >= 10**24:
+                return 2**62
     return loss
 
 
@@ -1405,17 +1450,51 @@ def _risk(cfg: Config) -> tuple[int, int, int, int]:
     return cfg.stop_bps, cfg.take_bps, cfg.trail_arm_bps, cfg.trail_gap_bps
 
 
+def _base_matches(symbol: object, base_asset: object) -> bool:
+    """The exchange base is the pair's own coin. A long or foreign name does not sell."""
+    if not usdt_symbol_ok(symbol) or not isinstance(base_asset, str) or len(base_asset) > 10:
+        return False
+    return base_asset == symbol[:-4]
+
+
+def _short(text: object) -> str:
+    """A cycle message stays on one screen. The raw body is not copied whole."""
+    if not isinstance(text, str):
+        return "unreadable"
+    return text if len(text) <= 180 else text[:180]
+
+
+def _shown_price(price: object) -> str:
+    """A log line. A price at the ceiling is text, not an exception after the fill."""
+    if isinstance(price, bool) or not isinstance(price, int) or price <= 0 or price >= 10**24:
+        return "unreadable"
+    try:
+        return format_price(price)
+    except MoneyError:
+        return "unreadable"
+
+
+def _shown_usdt(micro: object) -> str:
+    """A log line. A cash figure at the ceiling does not abort the cycle."""
+    if isinstance(micro, bool) or not isinstance(micro, int) or micro <= -10**24 or micro >= 10**24:
+        return "unreadable"
+    try:
+        return format_usdt(micro)
+    except MoneyError:
+        return "unreadable"
+
+
 def _log_oracle(symbol: str, mexc_micro: int, quotes: dict[str, int], data_dir: Path | None = None) -> None:
     peers = list(quotes.values())
     lag = lag_bps(mexc_micro, peers)
     width = deviation_bps([mexc_micro, *peers])
-    binance = format_price(quotes["binance"]) if "binance" in quotes else "-"
-    bybit = format_price(quotes["bybit"]) if "bybit" in quotes else "-"
-    okx = format_price(quotes["okx"]) if "okx" in quotes else "-"
+    binance = _shown_price(quotes["binance"]) if "binance" in quotes else "-"
+    bybit = _shown_price(quotes["bybit"]) if "bybit" in quotes else "-"
+    okx = _shown_price(quotes["okx"]) if "okx" in quotes else "-"
     LOG.info(
         "oracle %s mexc=%s binance=%s bybit=%s okx=%s lag_bps=%s width_bps=%s",
         symbol,
-        format_price(mexc_micro),
+        _shown_price(mexc_micro),
         binance,
         bybit,
         okx,
@@ -1423,4 +1502,4 @@ def _log_oracle(symbol: str, mexc_micro: int, quotes: dict[str, int], data_dir: 
         "-" if width is None else width,
     )
     if data_dir is not None:
-        note_quote(data_dir, symbol, format_price(mexc_micro), binance, bybit, okx, lag, width)
+        note_quote(data_dir, symbol, _shown_price(mexc_micro), binance, bybit, okx, lag, width)

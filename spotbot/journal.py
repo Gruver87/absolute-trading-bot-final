@@ -22,7 +22,17 @@ def ops_root(book_path: Path) -> Path:
 
 def note_event(data_dir: Path, **fields: object) -> None:
     """Append one trade or skip. A journal failure does not abort the cycle."""
-    row = {"at": _now(), **fields}
+    clean: dict[str, object] = {}
+    for key, value in fields.items():
+        if not isinstance(key, str) or len(key) > 32:
+            continue
+        if isinstance(value, str):
+            clean[key] = value if len(value) <= 180 else value[:180]
+        elif isinstance(value, bool) or value is None:
+            clean[key] = value
+        elif isinstance(value, int) and -10**24 < value < 10**24:
+            clean[key] = value
+    row = {"at": _now(), **clean}
     try:
         with _LOCK:
             data_dir.mkdir(parents=True, exist_ok=True)
@@ -44,6 +54,11 @@ def note_quote(
     lag_bps: int | None,
     width_bps: int | None,
 ) -> None:
+    if not isinstance(symbol, str) or not symbol or len(symbol) > 32:
+        return
+    venues = (_venue_text(mexc), _venue_text(binance), _venue_text(bybit), _venue_text(okx))
+    lag = _small_bps(lag_bps)
+    width = _small_bps(width_bps)
     try:
         with _LOCK:
             data_dir.mkdir(parents=True, exist_ok=True)
@@ -54,20 +69,36 @@ def note_quote(
                     loaded = json.loads(path.read_text(encoding="utf-8"))
                 except (OSError, UnicodeError, json.JSONDecodeError, MemoryError):
                     loaded = None
-                if isinstance(loaded, dict):
+                if isinstance(loaded, dict) and len(loaded) <= 32:
                     raw = loaded
             raw[symbol] = {
                 "at": _now(),
-                "mexc": mexc,
-                "binance": binance,
-                "bybit": bybit,
-                "okx": okx,
-                "lag_bps": lag_bps,
-                "width_bps": width_bps,
+                "mexc": venues[0],
+                "binance": venues[1],
+                "bybit": venues[2],
+                "okx": venues[3],
+                "lag_bps": lag,
+                "width_bps": width,
             }
             _write(path, json.dumps(raw, indent=2))
     except (OSError, UnicodeError, TypeError, ValueError, MemoryError) as exc:
         LOG.warning("ops quote was not written: %s", exc)
+
+
+def _venue_text(value: object) -> str:
+    """A shown price is short text. A long or non-text value is not a quote."""
+    if not isinstance(value, str) or len(value) > 80:
+        return "unreadable"
+    return value
+
+
+def _small_bps(value: object) -> int | None:
+    """A width or a lag is a small integer. A fraction or a ceiling is omitted."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value <= -1_000_000_000 or value >= 1_000_000_000:
+        return None
+    return value
 
 
 def _event_lines(path: Path) -> list[str]:
@@ -95,6 +126,8 @@ def _write(path: Path, text: str) -> None:
 
 def note_heartbeat(data_dir: Path, book: str) -> None:
     """One timestamp for the ops page. Age is how long since the last finished cycle."""
+    if not isinstance(book, str) or len(book) > 32:
+        book = ""
     try:
         data_dir.mkdir(parents=True, exist_ok=True)
         payload = {"at": _now(), "book": book}

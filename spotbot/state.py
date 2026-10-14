@@ -5,8 +5,11 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import IO, Iterator
 
 from spotbot.money import MoneyError, implied_price_micro
 
@@ -158,12 +161,14 @@ def _pair_stops(raw: object) -> dict[str, list[int]]:
         return {}
     if not isinstance(raw, dict):
         raise LedgerError("pair stops are not an object")
+    if len(raw) > 14:
+        raise LedgerError("pair stops are too many")
     out: dict[str, list[int]] = {}
     for key, value in raw.items():
         if not isinstance(key, str):
             raise LedgerError("pair stop symbol is not text")
-        if not isinstance(value, list):
-            raise LedgerError("pair stop times are not a list")
+        if not isinstance(value, list) or len(value) > 8:
+            raise LedgerError("pair stop times are not a list" if not isinstance(value, list) else "pair stop list is too long")
         out[key] = [_as_int(item, "pair stop") for item in value]
     return out
 
@@ -173,6 +178,8 @@ def _pair_locks(raw: object) -> dict[str, int]:
         return {}
     if not isinstance(raw, dict):
         raise LedgerError("pair locks are not an object")
+    if len(raw) > 14:
+        raise LedgerError("pair locks are too many")
     out: dict[str, int] = {}
     for key, value in raw.items():
         if not isinstance(key, str):
@@ -204,6 +211,8 @@ def load_book(path: Path, paper_cash_micro: int) -> Book:
     rows = raw.get("positions", [])
     if not isinstance(rows, list):
         raise LedgerError("positions are not a list")
+    if len(rows) > 8:
+        raise LedgerError("book has too many positions")
     positions = [Position.from_json(item) for item in rows]
     if "price_scale" not in raw:
         for pos in positions:
@@ -287,7 +296,8 @@ def usdt_symbol_ok(symbol: str) -> bool:
     """A spot pair is uppercase letters and digits, quoted in USDT."""
     if not isinstance(symbol, str):
         return False
-    return bool(symbol.endswith("USDT") and len(symbol) > 4 and symbol[:-4].isalnum() and symbol[:-4].isupper())
+    base = symbol[:-4]
+    return bool(symbol.endswith("USDT") and 2 <= len(base) <= 10 and base.isalnum() and base.isupper())
 
 
 def _guard_day_ok(day: str) -> None:
@@ -369,6 +379,8 @@ def audit_book(book: Book) -> None:
             raise LedgerError(f"{label} is too large")
         if amount < 0:
             raise LedgerError(f"{label} is negative")
+    if book.pending_misses > 1_000:
+        raise LedgerError("pending misses are too many")
     if book.cooldown_until > 4_102_444_800:
         raise LedgerError("cooldown is not a timestamp")
     if book.seen_at < 0 or book.seen_at > 4_102_444_800:
@@ -421,8 +433,8 @@ def audit_book(book: Book) -> None:
             raise LedgerError(f"{pos.symbol} size or price is not positive")
         if pos.peak_micro < pos.entry_micro:
             raise LedgerError(f"{pos.symbol} peak is below the entry")
-        if not isinstance(pos.reason, str):
-            raise LedgerError("position reason is not text")
+        if not isinstance(pos.reason, str) or len(pos.reason) > 80:
+            raise LedgerError("position reason is not text" if not isinstance(pos.reason, str) else "position reason is too long")
         if not isinstance(pos.hold_flat, bool):
             raise LedgerError("gap hold is not a flag")
         if book.pending_side == "SELL" and book.pending_client_id and pos.client_order_id == book.pending_client_id:
@@ -465,6 +477,57 @@ def bind_ledger(book: Book, live: bool) -> None:
     if live and book.ledger == "" and book.positions:
         raise LedgerError("refusing live orders against an unmarked book that already holds a coin")
     book.ledger = expected
+
+
+def _lock_file(handle: IO[bytes]) -> None:
+    """One non-blocking byte lock. The operating system drops it when the process dies."""
+    file = handle
+    if file.seek(0, os.SEEK_END) == 0:
+        file.write(b"\0")
+        file.flush()
+    file.seek(0)
+    if sys.platform == "win32":
+        import msvcrt
+
+        msvcrt.locking(file.fileno(), msvcrt.LK_NBLCK, 1)
+        return
+    import fcntl
+
+    fcntl.flock(file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _unlock_file(handle: IO[bytes]) -> None:
+    file = handle
+    file.seek(0)
+    if sys.platform == "win32":
+        import msvcrt
+
+        msvcrt.locking(file.fileno(), msvcrt.LK_UNLCK, 1)
+        return
+    import fcntl
+
+    fcntl.flock(file.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def hold_ledger(directory: Path) -> Iterator[None]:
+    """Keep this paper or live directory. A second process does not trade over it."""
+    if not isinstance(directory, Path):
+        raise LedgerError("ledger directory is not a path")
+    directory.mkdir(parents=True, exist_ok=True)
+    handle = (directory / ".ledger.lock").open("a+b")
+    try:
+        _lock_file(handle)
+    except OSError as exc:
+        handle.close()
+        raise LedgerError("another process holds this ledger") from exc
+    try:
+        yield
+    finally:
+        try:
+            _unlock_file(handle)
+        finally:
+            handle.close()
 
 
 def write_atomic(path: Path, text: str) -> None:
@@ -520,7 +583,7 @@ def remember_pending(
         raise LedgerError("pending client id is not an exchange id")
     if not usdt_symbol_ok(symbol):
         raise LedgerError("pending symbol is not a USDT pair")
-    if not _is_int(base_atoms) or not _is_int(quote_micro) or base_atoms < 0 or quote_micro < 0:
+    if not _is_int(base_atoms) or not _is_int(quote_micro) or base_atoms < 0 or quote_micro < 0 or base_atoms >= _MAX_BOOK or quote_micro >= _MAX_BOOK:
         raise LedgerError("pending size is not a non-negative integer")
     if side == "SELL" and base_atoms <= 0:
         raise LedgerError("pending sell has no size")
@@ -577,7 +640,7 @@ def record_buy(
     """Debit quote and fee once. A repeated client id or a second row of the same pair does not debit again."""
     if not client_id_ok(client_order_id) or not exchange_order_id_ok(exchange_order_id):
         return False
-    if not usdt_symbol_ok(symbol) or not isinstance(reason, str):
+    if not usdt_symbol_ok(symbol) or not isinstance(reason, str) or len(reason) > 80:
         return False
     if any(pos.client_order_id == client_order_id for pos in book.positions):
         return False
@@ -585,6 +648,8 @@ def record_buy(
         return False
     nums = (price_micro, base_atoms, quote_micro, fee_micro, book.cash_micro, book.fees_micro)
     if any(not _is_int(item) for item in nums):
+        return False
+    if price_micro >= _MAX_BOOK or base_atoms >= _MAX_BOOK or quote_micro >= _MAX_BOOK or fee_micro >= _MAX_BOOK:
         return False
     debit = quote_micro + fee_micro
     if debit <= 0 or base_atoms <= 0 or debit > book.cash_micro:
@@ -627,6 +692,8 @@ def apply_buy_progress(
         or not exchange_order_id_ok(exchange_order_id)
         or (book.pending_exchange_order_id != "" and book.pending_exchange_order_id != exchange_order_id)
     ):
+        return False
+    if not isinstance(reason, str) or len(reason) > 80:
         return False
     nums = (price_micro, base_atoms, quote_micro, fee_micro, base_fee_atoms, book.cash_micro, book.fees_micro)
     if any(not _is_int(item) for item in nums):
@@ -682,6 +749,11 @@ def apply_buy_progress(
             or existing.quote_micro != booked
             or debit > book.cash_micro
             or existing.base_atoms + delta_net <= 0
+            or debit >= _MAX_BOOK
+            or delta_net >= _MAX_BOOK
+            or existing.base_atoms >= _MAX_BOOK - delta_net
+            or existing.quote_micro >= _MAX_BOOK - debit
+            or book.fees_micro >= _MAX_BOOK - delta_fee
         ):
             return False
         book.cash_micro -= debit
@@ -774,9 +846,15 @@ def record_sell_fill(
 
     Two rows of the same pair are not guessed. Pass the row that was sent.
     """
+    if not isinstance(symbol, str):
+        return False
     if any(not _is_int(item) for item in (sold_atoms, credit_micro, fee_micro, book.cash_micro, book.fees_micro, book.realized_micro)):
         return False
     if sold_atoms <= 0 or credit_micro < 0 or fee_micro < 0:
+        return False
+    if sold_atoms >= _MAX_BOOK or credit_micro >= _MAX_BOOK or fee_micro >= _MAX_BOOK:
+        return False
+    if book.cash_micro >= _MAX_BOOK - credit_micro or book.fees_micro >= _MAX_BOOK - fee_micro:
         return False
     matches = [pos for pos in book.positions if pos.symbol == symbol]
     if hold is not None:
@@ -790,9 +868,12 @@ def record_sell_fill(
     if sold_atoms > pos.base_atoms:
         return False
     released = pos.quote_micro if sold_atoms == pos.base_atoms else pos.quote_micro * sold_atoms // pos.base_atoms
+    realized = book.realized_micro + credit_micro - released
+    if realized >= _MAX_BOOK or realized <= -_MAX_BOOK:
+        return False
     book.cash_micro += credit_micro
     book.fees_micro += fee_micro
-    book.realized_micro += credit_micro - released
+    book.realized_micro = realized
     if sold_atoms == pos.base_atoms:
         book.positions = [item for item in book.positions if item is not pos]
     else:

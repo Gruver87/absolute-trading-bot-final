@@ -14,11 +14,17 @@ def inventory_mismatch(
     `elsewhere` is other books of this same bot on the same account, such as the
     other sleeves. Their coins are part of the expected total.
     """
+    from spotbot.state import usdt_symbol_ok
+
+    if len(positions) > 8 or len(elsewhere or []) > 64:
+        return "too many coins"
     held: dict[str, int] = {}
     seen: set[str] = set()
     for symbol, atoms in [*positions, *(elsewhere or [])]:
         if not isinstance(symbol, str):
             return "pair name is not text"
+        if len(symbol) > 32:
+            return "pair name is too long"
         if symbol in seen:
             return f"{symbol} is listed twice"
         seen.add(symbol)
@@ -26,17 +32,27 @@ def inventory_mismatch(
             return f"{symbol} base is not an integer"
         if atoms < 0:
             return f"{symbol} base is negative"
-        if not symbol.endswith("USDT") or len(symbol) <= 4:
+        if atoms >= 10**24:
+            return f"{symbol} base is too large"
+        if not usdt_symbol_ok(symbol):
             return f"{symbol} is not a USDT pair"
         asset = symbol[: -4]
         held[asset] = atoms
     for asset, need in held.items():
         have = bases_atoms.get(asset, 0)
+        if isinstance(have, int) and not isinstance(have, bool) and (have < 0 or have >= 10**24):
+            return "exchange balance is too large"
         if isinstance(have, bool) or not isinstance(have, int) or have != need:
             return f"{asset} exchange {have} != book {need}"
     for asset, have in bases_atoms.items():
+        if not isinstance(asset, str) or len(asset) > 32:
+            return "exchange asset is not text"
         if isinstance(have, bool) or not isinstance(have, int):
             return f"exchange {asset} is not an integer"
+        if have < 0:
+            return "exchange balance is negative"
+        if have >= 10**24:
+            return "exchange balance is too large"
         if have > 0 and asset not in held:
             return f"exchange holds {asset} and the book does not"
     return None
@@ -45,6 +61,8 @@ def inventory_mismatch(
 def base_is_free(free_atoms: int, need_atoms: int) -> bool:
     """A sell needs the whole position free. Locked coins stay on the book."""
     if isinstance(free_atoms, bool) or not isinstance(free_atoms, int) or isinstance(need_atoms, bool) or not isinstance(need_atoms, int):
+        return False
+    if free_atoms < 0 or free_atoms >= 10**24 or need_atoms <= 0 or need_atoms >= 10**24:
         return False
     return need_atoms > 0 and free_atoms >= need_atoms
 
@@ -55,8 +73,10 @@ def _status_name(body: object) -> str:
         return ""
     status = body.get("status")
     if isinstance(status, str):
-        return status
+        return status if len(status) <= 32 else ""
     if isinstance(status, bool) or isinstance(status, float) or not isinstance(status, int):
+        return ""
+    if status < 0 or status > 9:
         return ""
     return str(status)
 
@@ -87,7 +107,7 @@ def _has_code(text: str, code: str) -> bool:
 
 def order_missing(message: str) -> bool:
     """True only for an unknown order. A missing symbol or balance is not that."""
-    if not isinstance(message, str):
+    if not isinstance(message, str) or len(message) > 512:
         return False
     text = message.lower()
     if "order does not exist" in text or "unknown order" in text:
@@ -113,6 +133,8 @@ def fills_match(traded_base: int, traded_quote: int, order_base: int, order_quot
     nums = (traded_base, traded_quote, order_base, order_quote)
     if any(isinstance(item, bool) or not isinstance(item, int) for item in nums):
         return False
+    if any(item >= 10**24 for item in nums):
+        return False
     return traded_base == order_base and traded_quote == order_quote and order_base > 0 and order_quote > 0
 
 
@@ -120,7 +142,7 @@ def ack_fee_matches(ack_fee_micro: int, trade_fee_micro: int) -> bool:
     """A fee named on the order ack must equal the trade rows. Zero means the ack omitted it."""
     if isinstance(ack_fee_micro, bool) or not isinstance(ack_fee_micro, int) or isinstance(trade_fee_micro, bool) or not isinstance(trade_fee_micro, int):
         return False
-    if ack_fee_micro < 0 or trade_fee_micro < 0:
+    if ack_fee_micro < 0 or trade_fee_micro < 0 or ack_fee_micro >= 10**24 or trade_fee_micro >= 10**24:
         return False
     return ack_fee_micro == 0 or ack_fee_micro == trade_fee_micro
 
@@ -129,12 +151,16 @@ def fee_fits(fee_micro: int, room_micro: int) -> bool:
     """A known fee is booked in full. It is not trimmed to fit the cash or the fill."""
     if isinstance(fee_micro, bool) or not isinstance(fee_micro, int) or isinstance(room_micro, bool) or not isinstance(room_micro, int):
         return False
+    if fee_micro >= 10**24 or room_micro >= 10**24:
+        return False
     return fee_micro >= 0 and room_micro >= fee_micro
 
 
 def order_is_ours(body: dict[str, object], symbol: str, side: str, client_id: str) -> bool:
     """True only when the ack is the symbol, side, and client id we sent."""
     if not isinstance(body, dict) or not isinstance(symbol, str) or not isinstance(side, str) or not isinstance(client_id, str):
+        return False
+    if len(symbol) > 32 or len(side) > 8 or len(client_id) > 32:
         return False
     if not symbol or not side or not client_id:
         return False
@@ -143,7 +169,7 @@ def order_is_ours(body: dict[str, object], symbol: str, side: str, client_id: st
         got = body.get(key)
         if got in (None, ""):
             continue
-        if not isinstance(got, str):
+        if not isinstance(got, str) or len(got) > 32:
             return False
         ids.append(got)
     if not ids or any(item != client_id for item in ids):
@@ -152,6 +178,8 @@ def order_is_ours(body: dict[str, object], symbol: str, side: str, client_id: st
     got_side = body.get("side")
     got_type = body.get("type")
     if not isinstance(got_symbol, str) or not isinstance(got_side, str) or not isinstance(got_type, str):
+        return False
+    if len(got_symbol) > 32 or len(got_side) > 8 or len(got_type) > 16:
         return False
     return ids[0] == client_id and got_symbol == symbol and got_side.upper() == side.upper() and got_type.upper() == "MARKET"
 
@@ -176,6 +204,10 @@ def split_commission(
         raise FeeAssetError("commission needs an order, a base asset, and a side")
     if not order_id.isdigit() or len(order_id) > 32:
         raise FeeAssetError("trade order id is not digits")
+    if len(base_asset) > 10 or not base_asset.isalnum() or not base_asset.isupper():
+        raise FeeAssetError("commission base asset is not a coin name")
+    if len(trades) > 5_000:
+        raise FeeAssetError("trade list is too large")
     from spotbot.money import (
         BASE_ATOMS,
         MICRO,
@@ -246,6 +278,8 @@ def split_commission(
             raise FeeAssetError("trade price does not match qty")
         traded_base += row_base
         traded_quote += row_quote
+        if traded_base >= 10**24 or traded_quote >= 10**24 or usdt >= 10**24 or base >= 10**24:
+            raise FeeAssetError("trade total is too large")
         commission = row.get("commission")
         if commission in (None, ""):
             continue
@@ -282,13 +316,17 @@ def split_commission(
         raise FeeAssetError("order has no trade row")
     if traded_base <= 0 or traded_quote <= 0:
         raise FeeAssetError("trade qty is zero")
+    if traded_base >= 10**24 or traded_quote >= 10**24 or usdt >= 10**24 or base >= 10**24:
+        raise FeeAssetError("trade total is too large")
     return usdt, base, traded_base, traded_quote
 
 
 def usdt_commission(trades: list[object], order_id: str) -> int:
     """Sum USDT commission rows for one exchange order. Other assets are ignored."""
-    if not isinstance(order_id, str) or not order_id:
+    if not isinstance(order_id, str) or not order_id or len(order_id) > 32:
         return 0
+    if len(trades) > 5_000:
+        raise FeeAssetError("trade list is too large")
     from spotbot.money import MoneyError, decimal_text, parse_micro_nonneg
 
     total = 0
@@ -305,4 +343,6 @@ def usdt_commission(trades: list[object], order_id: str) -> int:
         if commission in (None, ""):
             continue
         total += parse_micro_nonneg(decimal_text(commission))
+        if total >= 10**24:
+            raise FeeAssetError("trade total is too large")
     return total

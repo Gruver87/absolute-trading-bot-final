@@ -41,7 +41,7 @@ class OracleError(RuntimeError):
 
 def _price_ok(price: int) -> bool:
     """A bool is not a price of one. It is left out of the width and the lag."""
-    return not isinstance(price, bool) and isinstance(price, int) and price > 0
+    return not isinstance(price, bool) and isinstance(price, int) and 0 < price < 10**24
 
 
 def _lower_middle(ordered: list[int]) -> int:
@@ -57,6 +57,8 @@ def deviation_bps(prices: list[int]) -> int | None:
 
     An even count uses the lower middle price, so the width is not understated.
     """
+    if len(prices) > 8:
+        return None
     vals = [price for price in prices if _price_ok(price)]
     if len(vals) < 2:
         return None
@@ -72,6 +74,8 @@ def lag_bps(mexc_micro: int, peers: list[int]) -> int | None:
 
     Positive means MEXC is richer. None when there is no other price.
     """
+    if len(peers) > 8:
+        return None
     vals = [price for price in peers if _price_ok(price)]
     if not _price_ok(mexc_micro) or not vals:
         return None
@@ -84,6 +88,8 @@ def lag_bps(mexc_micro: int, peers: list[int]) -> int | None:
 
 def cheapest_first(rows: list[tuple[str, int]]) -> list[str]:
     """Order symbols by lag. A lower lag means MEXC is cheaper. Ties follow the name."""
+    if len(rows) > 32:
+        return []
     clean = [
         (symbol, lag)
         for symbol, lag in rows
@@ -118,7 +124,9 @@ def peer_prices(symbol: str, timeout_sec: int = 5) -> list[int]:
 
 def venue_quotes(symbol: str, timeout_sec: int = 5) -> dict[str, int]:
     """Binance, Bybit, and OKX spot last prices, keyed by venue."""
-    if not isinstance(symbol, str) or not symbol or isinstance(timeout_sec, bool) or not isinstance(timeout_sec, int) or timeout_sec < 1:
+    from spotbot.state import usdt_symbol_ok
+
+    if not usdt_symbol_ok(symbol) or isinstance(timeout_sec, bool) or not isinstance(timeout_sec, int) or timeout_sec < 1 or timeout_sec > 30:
         return {}
     session = getattr(_LOCAL, "session", None)
     if session is None:
@@ -156,7 +164,8 @@ def venue_quotes(symbol: str, timeout_sec: int = 5) -> dict[str, int]:
         try:
             response = session.get(url, params=params, timeout=timeout_sec, allow_redirects=False)
         except requests.RequestException as exc:
-            LOG.warning("oracle %s %s: %s", label, symbol, exc)
+            text = str(exc)
+            LOG.warning("oracle %s %s: %s", label, symbol, text if len(text) <= 180 else text[:180])
             continue
         if response.status_code != 200:
             LOG.warning("oracle %s %s HTTP %s", label, symbol, response.status_code)
@@ -176,7 +185,9 @@ def venue_quotes(symbol: str, timeout_sec: int = 5) -> dict[str, int]:
 
 
 def _okx_inst(symbol: str) -> str | None:
-    if not isinstance(symbol, str) or not symbol.endswith("USDT") or len(symbol) <= 4:
+    from spotbot.state import usdt_symbol_ok
+
+    if not usdt_symbol_ok(symbol):
         return None
     return f"{symbol[:-4]}-USDT"
 
@@ -195,7 +206,7 @@ def _bybit_price(body: object, symbol: str) -> str | None:
     if not isinstance(result, dict):
         return None
     rows = result.get("list")
-    if not isinstance(rows, list) or not rows or not isinstance(rows[0], dict):
+    if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
         return None
     named = rows[0].get("symbol")
     if not isinstance(named, str) or named != symbol:
@@ -207,7 +218,7 @@ def _okx_price(body: object, inst_id: str) -> str | None:
     if not isinstance(body, dict):
         return None
     rows = body.get("data")
-    if not isinstance(rows, list) or not rows or not isinstance(rows[0], dict):
+    if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
         return None
     named = rows[0].get("instId")
     if not isinstance(named, str) or named != inst_id:

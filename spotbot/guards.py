@@ -7,8 +7,8 @@ counts stops on that symbol only. The spread check is one book ticker, not a soc
 from __future__ import annotations
 
 from spotbot.fees import paper_sell
-from spotbot.money import notional_micro
-from spotbot.state import Book, Position
+from spotbot.money import MoneyError, notional_micro
+from spotbot.state import Book, Position, usdt_symbol_ok
 
 STOP_LOOKBACK_SEC = 86_400
 _MAX_STAMPS = 8
@@ -25,30 +25,37 @@ def marked_equity(
     With taker rates, the coin is the bid after the sell fee. A missing mark
     or a missing rate refuses the number. Without rates the mark is the gross bid.
     """
-    if isinstance(cash_micro, bool) or not isinstance(cash_micro, int):
+    if isinstance(cash_micro, bool) or not isinstance(cash_micro, int) or cash_micro <= -10**24 or cash_micro >= 10**24:
         return None
     equity = cash_micro
     for pos in positions:
         price = marks.get(pos.symbol, 0)
         if isinstance(price, bool) or isinstance(pos.base_atoms, bool) or not isinstance(price, int) or not isinstance(pos.base_atoms, int) or price <= 0 or pos.base_atoms <= 0:
             return None
-        gross = notional_micro(pos.base_atoms, price)
+        try:
+            gross = notional_micro(pos.base_atoms, price)
+        except MoneyError:
+            return None
         if taker_bps is None:
             equity += gross
-            continue
-        bps = taker_bps.get(pos.symbol)
-        if bps is None or isinstance(bps, bool) or not isinstance(bps, int):
+        else:
+            bps = taker_bps.get(pos.symbol)
+            if bps is None or isinstance(bps, bool) or not isinstance(bps, int):
+                return None
+            credit, fee = paper_sell(pos.base_atoms, price, bps)
+            if credit < 0 or fee < 0 or credit + fee != gross:
+                return None
+            equity += credit
+        if equity >= 10**24:
             return None
-        credit, fee = paper_sell(pos.base_atoms, price, bps)
-        if credit < 0 or fee < 0 or credit + fee != gross:
-            return None
-        equity += credit
     return equity
 
 
 def drawdown_blocks(peak_micro: int, equity_micro: int, bps: int) -> bool:
     """True when the drop from the stored peak is at least bps of that peak."""
     if isinstance(peak_micro, bool) or isinstance(equity_micro, bool) or isinstance(bps, bool) or not isinstance(peak_micro, int) or not isinstance(equity_micro, int) or not isinstance(bps, int) or equity_micro < 0:
+        return True
+    if peak_micro >= 10**24 or equity_micro >= 10**24:
         return True
     if bps <= 0 or peak_micro <= 0 or equity_micro >= peak_micro:
         return False
@@ -59,9 +66,15 @@ def note_pair_stop(book: Book, symbol: str, now: int, count: int, lock_sec: int)
     """Remember one stop. The lock starts only after enough stops inside the lookback."""
     if isinstance(now, bool) or isinstance(count, bool) or isinstance(lock_sec, bool) or not isinstance(now, int) or not isinstance(count, int) or not isinstance(lock_sec, int):
         return
-    if now < 0 or count < 2 or not isinstance(symbol, str) or not symbol.endswith("USDT") or len(symbol) <= 4:
+    if now < 0 or count < 2 or not usdt_symbol_ok(symbol):
         return
-    fresh = [stamp for stamp in (book.pair_stops or {}).get(symbol, []) if now - STOP_LOOKBACK_SEC < stamp <= now]
+    if lock_sec > 86_400:
+        lock_sec = 86_400
+    fresh = [
+        stamp
+        for stamp in (book.pair_stops or {}).get(symbol, [])
+        if isinstance(stamp, int) and not isinstance(stamp, bool) and now - STOP_LOOKBACK_SEC < stamp <= now
+    ]
     fresh.append(now)
     stops = dict(book.pair_stops or {})
     stops[symbol] = fresh[-_MAX_STAMPS:]
@@ -74,7 +87,7 @@ def note_pair_stop(book: Book, symbol: str, now: int, count: int, lock_sec: int)
 
 def pair_locked(book: Book, symbol: str, now: int) -> bool:
     """True while this symbol's stop lock is still in the future."""
-    if isinstance(now, bool) or not isinstance(now, int) or not isinstance(symbol, str):
+    if isinstance(now, bool) or not isinstance(now, int) or not usdt_symbol_ok(symbol):
         return True
     until = (book.pair_lock_until or {}).get(symbol, 0)
     if isinstance(until, bool) or not isinstance(until, int):
@@ -84,7 +97,7 @@ def pair_locked(book: Book, symbol: str, now: int) -> bool:
 
 def top_spread_bps(bid_micro: int, ask_micro: int) -> int:
     """Bid to ask in basis points. A crossed or empty book is refused."""
-    if isinstance(bid_micro, bool) or isinstance(ask_micro, bool) or not isinstance(bid_micro, int) or not isinstance(ask_micro, int) or bid_micro <= 0 or ask_micro < bid_micro:
+    if isinstance(bid_micro, bool) or isinstance(ask_micro, bool) or not isinstance(bid_micro, int) or not isinstance(ask_micro, int) or bid_micro <= 0 or ask_micro < bid_micro or bid_micro >= 10**24 or ask_micro >= 10**24:
         raise ValueError("book is crossed or empty")
     return (ask_micro - bid_micro) * 10_000 // bid_micro
 

@@ -71,12 +71,16 @@ def parse_symbol_rule(row: dict[str, object]) -> SymbolRule:
 def round_base_atoms(atoms: int, step_atoms: int) -> int:
     if isinstance(atoms, bool) or isinstance(step_atoms, bool) or not isinstance(atoms, int) or not isinstance(step_atoms, int) or atoms <= 0 or step_atoms <= 0:
         return 0
+    if atoms >= 10**24 or step_atoms >= 10**24:
+        return 0
     return atoms // step_atoms * step_atoms
 
 
 def uses_slot(base_atoms: int, step_atoms: int) -> bool:
     """Dust below the lot stays on the book and does not block a new entry."""
     if isinstance(base_atoms, bool) or isinstance(step_atoms, bool) or not isinstance(base_atoms, int) or not isinstance(step_atoms, int):
+        return True
+    if base_atoms >= 10**24 or step_atoms >= 10**24:
         return True
     return round_base_atoms(base_atoms, step_atoms) > 0
 
@@ -85,12 +89,16 @@ def round_quote_micro(amount_micro: int, step_micro: int) -> int:
     """Floor the quote spend to the market minimum step from exchangeInfo."""
     if isinstance(amount_micro, bool) or isinstance(step_micro, bool) or not isinstance(amount_micro, int) or not isinstance(step_micro, int) or amount_micro <= 0 or step_micro <= 0:
         return 0
+    if amount_micro >= 10**24 or step_micro >= 10**24:
+        return 0
     return amount_micro // step_micro * step_micro
 
 
 def budget_micro(cash_micro: int, alloc_bps: int) -> int:
     """Quote the book may spend. An allocation above the whole cash spends nothing."""
     if isinstance(cash_micro, bool) or isinstance(alloc_bps, bool) or not isinstance(cash_micro, int) or not isinstance(alloc_bps, int) or cash_micro <= 0 or alloc_bps < 1 or alloc_bps > 10_000:
+        return 0
+    if cash_micro >= 10**24:
         return 0
     return cash_micro * alloc_bps // 10_000
 
@@ -105,6 +113,8 @@ def cap_spend(
     """Spend the smaller of the book budget and free quote. Locked quote is not free."""
     nums = (budget_micro, free_micro, step_micro, min_micro, max_micro)
     if any(isinstance(item, bool) or not isinstance(item, int) for item in nums) or budget_micro <= 0 or free_micro < 0 or step_micro <= 0 or min_micro < 0:
+        return 0
+    if budget_micro >= 10**24 or free_micro >= 10**24 or step_micro >= 10**24 or min_micro >= 10**24 or max_micro >= 10**24:
         return 0
     spend = budget_micro if budget_micro < free_micro else free_micro
     if max_micro > 0 and spend > max_micro:
@@ -153,15 +163,31 @@ def _refuse_reason(row: dict[str, object]) -> str:
     symbol = row.get("symbol")
     if not isinstance(base, str) or not isinstance(symbol, str) or not base or symbol != f"{base}USDT":
         return "base asset does not match the symbol"
+    from spotbot.state import usdt_symbol_ok
+
+    if not usdt_symbol_ok(symbol):
+        return "symbol is not a USDT pair"
     st = row.get("st")
     if st is True or st == 1 or (isinstance(st, str) and st.strip().lower() == "true"):
         return "ST tag"
     plates = row.get("conceptPlates")
     if isinstance(plates, list):
+        if len(plates) > 32:
+            return "plates are too many"
         for plate in plates:
-            if isinstance(plate, str) and "assessment" in plate.lower():
+            if plate is None:
+                continue
+            if not isinstance(plate, str):
+                return "plate name is not text"
+            if len(plate) > 64:
+                return "plate name is too long"
+            if "assessment" in plate.lower():
                 return "assessment zone"
     types = row.get("orderTypes")
+    if isinstance(types, list) and len(types) > 32:
+        return "order types are too many"
+    if isinstance(types, list) and any(isinstance(item, str) and len(item) > 32 for item in types):
+        return "order type is too long"
     names = {item.upper() for item in types if isinstance(item, str)} if isinstance(types, list) else set()
     if "MARKET" not in names:
         return "market orders are off"
@@ -204,6 +230,8 @@ def _step_atoms(raw: object) -> tuple[int, str]:
     atoms = micro * (BASE_ATOMS // MICRO)
     if atoms <= 0:
         return 0, "base step is missing"
+    if atoms >= 10**24:
+        return 0, "base step is too large"
     return atoms, ""
 
 
@@ -213,11 +241,16 @@ def _price_tick(raw: object) -> tuple[int, str]:
         return 0, "price precision is not a count of decimals"
     if raw is None or (isinstance(raw, str) and raw.strip() == ""):
         return 0, "price precision is missing"
-    text = raw.strip() if isinstance(raw, str) else str(raw)
-    if not text.isdigit():
+    if isinstance(raw, int):
+        places = raw
+    elif isinstance(raw, str):
+        text = raw.strip()
+        if len(text) > 2 or not text.isdigit():
+            return 0, "price precision is not a count of decimals"
+        places = int(text)
+    else:
         return 0, "price precision is not a count of decimals"
-    places = int(text)
-    if places > 12:
+    if places < 0 or places > 12:
         return 0, "price precision is finer than the price scale"
     tick = PRICE_SCALE // (10 ** places)
     if tick <= 0:

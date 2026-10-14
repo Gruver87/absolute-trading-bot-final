@@ -13,12 +13,16 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from spotbot.analyzer import backend
-from spotbot.config import ConfigError, load_config
+from spotbot.config import Config, ConfigError, load_config
 from spotbot.engine import run_cycle
 from spotbot.mexc import MexcClient, MexcError, MexcRateLimit, backoff_sec
+from spotbot.money import MoneyError
 from spotbot.ops_http import DEFAULT_PORT, OpsError, parse_ops_port, serve
 from spotbot.sleeves import SleeveError, ledger_dir, run_sleeves
-from spotbot.state import LedgerError
+from spotbot.state import LedgerError, hold_ledger
+
+# A money or value error stops this pass. The process stays up and the next pass reads the book again.
+CYCLE_HOLDS = (MoneyError, ValueError, TypeError)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -59,6 +63,16 @@ def main(argv: list[str] | None = None) -> int:
         threading.Thread(target=serve, args=(data_dir, ops_port), name="spot-ops", daemon=True).start()
         logging.info("ops http://127.0.0.1:%s", ops_port)
     client = MexcClient(cfg.api_key, cfg.api_secret)
+    try:
+        with hold_ledger(ledger_dir(data_dir, cfg.live)):
+            return _trade(args, cfg, client, data_dir)
+    except LedgerError as exc:
+        logging.error("%s", exc)
+        return 2
+
+
+def _trade(args: argparse.Namespace, cfg: Config, client: MexcClient, data_dir: Path) -> int:
+    """One process, one ledger. The caller already holds the directory."""
     if args.sleeves:
         logging.info("mode=%s sleeves=major,alt,meme strategy=%s", "LIVE" if cfg.live else "PAPER", cfg.mode)
         while True:
@@ -75,6 +89,11 @@ def main(argv: list[str] | None = None) -> int:
                 logging.error("rate limit pause %ss", pause)
             except MexcError as exc:
                 logging.error("cycle failed closed: %s", exc)
+                if args.once:
+                    return 1
+                pause = cfg.interval_sec
+            except CYCLE_HOLDS:
+                logging.exception("cycle failed closed")
                 if args.once:
                     return 1
                 pause = cfg.interval_sec
@@ -104,6 +123,11 @@ def main(argv: list[str] | None = None) -> int:
             logging.error("rate limit pause %ss", pause)
         except (MexcError, LedgerError) as exc:
             logging.error("cycle failed closed: %s", exc)
+            if args.once:
+                return 1
+            pause = cfg.interval_sec
+        except CYCLE_HOLDS:
+            logging.exception("cycle failed closed")
             if args.once:
                 return 1
             pause = cfg.interval_sec
