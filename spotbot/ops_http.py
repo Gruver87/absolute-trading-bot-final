@@ -155,10 +155,13 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 def _show_book(loaded: object) -> object:
-    """Prices leave the page as text. A raw 1e12 integer does not survive in the browser."""
+    """Prices and cash leave the page as text. A raw integer does not survive in the browser."""
     view = _public(loaded)
     if not isinstance(view, dict) or not isinstance(loaded, dict):
         return view
+    for key in ("cash_micro", "realized_micro", "fees_micro", "funded_micro", "guard_cash_micro"):
+        if key in view:
+            view[key] = _money_text(view[key])
     positions = view.get("positions")
     if not isinstance(positions, list) or len(positions) > 8:
         if isinstance(positions, list):
@@ -171,6 +174,10 @@ def _show_book(loaded: object) -> object:
         if not isinstance(pos, dict) or len(pos) > 16:
             positions[index] = "unreadable"
             continue
+        if "quote_micro" in pos:
+            pos["quote_micro"] = _money_text(pos["quote_micro"])
+        if "base_atoms" in pos:
+            pos["base_atoms"] = _coin_text(pos["base_atoms"])
         for key in ("entry_micro", "peak_micro"):
             raw = pos.get(key)
             if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0 or raw >= 10**24:
@@ -182,6 +189,27 @@ def _show_book(loaded: object) -> object:
                 continue
             pos[key] = format_price(shown)
     return view
+
+
+def _coin_text(raw: object) -> str:
+    """Coin size as text. A raw atom count is not sent to the browser."""
+    from spotbot.money import BASE_ATOMS, MoneyError, format_fixed
+
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw <= 0 or raw >= 10**24:
+        return "unreadable"
+    try:
+        return format_fixed(raw, BASE_ATOMS)
+    except MoneyError:
+        return "unreadable"
+
+
+def _money_text(raw: object) -> str:
+    """USDT text for the page. A bool or a fraction is not a balance."""
+    from spotbot.money import format_usdt
+
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw <= -10**24 or raw >= 10**24:
+        return "unreadable"
+    return format_usdt(raw)
 
 
 def _public(value: object, depth: int = 0) -> object:
@@ -349,6 +377,7 @@ _PAGE = """<!DOCTYPE html>
 <header>
   <h1>Спот-бот, ops</h1>
   <p id="bind">локальная страница, mesh не трогает</p>
+  <p id="entries">новые покупки выключены, продаётся только уже открытая монета</p>
   <p id="beat">цикл ещё не завершался</p>
 </header>
 <main>
@@ -387,13 +416,32 @@ function renderBooks(books) {
   let html = "<thead><tr><th>книга</th><th>USDT</th><th>результат</th><th>комиссия</th><th>позиции</th></tr></thead><tbody>";
   for (const name of names) {
     const book = books[name];
-    if (name === "treasury") {
-      html += "<tr><td>treasury</td><td colspan='4'>уже разделено " + esc(usdt(book.funded_micro)) + "</td></tr>";
+    if (!book || typeof book !== "object") {
+      html += "<tr><td>" + esc(name) + "</td><td colspan='4'>" + esc(book) + "</td></tr>";
       continue;
     }
-    const pos = (book.positions || []).map(p => esc(p.symbol) + " @ " + esc(shown(p.entry_micro))).join(", ") || "—";
-    html += "<tr><td>" + esc(name) + "</td><td>" + esc(usdt(book.cash_micro)) + "</td><td>" + esc(usdt(book.realized_micro)) +
-      "</td><td>" + esc(usdt(book.fees_micro)) + "</td><td>" + pos + "</td></tr>";
+    if (book.error) {
+      html += "<tr><td>" + esc(name) + "</td><td colspan='4'>" + esc(book.error) + "</td></tr>";
+      continue;
+    }
+    if (name === "treasury" || name.endsWith("/treasury")) {
+      html += "<tr><td>" + esc(name) + "</td><td colspan='4'>уже разделено " + esc(money(book.funded_micro)) + "</td></tr>";
+      continue;
+    }
+    let pos = "—";
+    if (book.positions === "unreadable") pos = "не читается";
+    else if (Array.isArray(book.positions)) {
+      pos = book.positions.map(function (p) {
+        if (!p || typeof p !== "object") return "не читается";
+        const size = p.base_atoms == null ? "" : " " + esc(p.base_atoms);
+        const cost = p.quote_micro == null ? "" : " · " + esc(money(p.quote_micro));
+        const held = p.hold_flat === true ? " · удержание, ниже себестоимости не продаётся" : "";
+        const lot = p.below_lot === true ? " · меньше шага лота, продажа не уходит" : "";
+        return esc(p.symbol) + size + " @ " + esc(shown(p.entry_micro)) + cost + held + lot;
+      }).join(", ") || "—";
+    }
+    html += "<tr><td>" + esc(name) + "</td><td>" + esc(money(book.cash_micro)) + "</td><td>" + esc(money(book.realized_micro)) +
+      "</td><td>" + esc(money(book.fees_micro)) + "</td><td>" + pos + "</td></tr>";
   }
   return html + "</tbody>";
 }
@@ -403,6 +451,10 @@ function renderQuotes(quotes) {
   let html = "<thead><tr><th>пара</th><th>MEXC</th><th>Binance</th><th>Bybit</th><th>OKX</th><th>lag</th><th>ширина</th><th>когда</th></tr></thead><tbody>";
   for (const name of names) {
     const q = quotes[name];
+    if (!q || typeof q !== "object") {
+      html += "<tr><td>" + esc(name) + "</td><td colspan='7'>не читается</td></tr>";
+      continue;
+    }
     html += "<tr><td>" + esc(name) + "</td><td>" + esc(q.mexc) + "</td><td>" + esc(q.binance) + "</td><td>" + esc(q.bybit) +
       "</td><td>" + esc(q.okx) + "</td><td>" + esc(q.lag_bps) + "</td><td>" + esc(q.width_bps) + "</td><td>" + esc(q.at) + "</td></tr>";
   }
@@ -410,19 +462,25 @@ function renderQuotes(quotes) {
 }
 function renderEvents(events) {
   if (!events.length) return "<tbody><tr><td>сделок нет</td></tr></tbody>";
-  let html = "<thead><tr><th>когда</th><th>книга</th><th>что</th><th>пара</th><th>цена</th><th>причина</th></tr></thead><tbody>";
+  let html = "<thead><tr><th>когда</th><th>книга</th><th>что</th><th>пара</th><th>цена</th><th>зачислено</th><th>причина</th></tr></thead><tbody>";
   for (const ev of events.slice().reverse()) {
+    if (!ev || typeof ev !== "object") continue;
     html += "<tr><td>" + esc(ev.at) + "</td><td>" + esc(ev.book) + "</td><td>" + esc(ev.kind) +
-      "</td><td>" + esc(ev.symbol) + "</td><td>" + esc(ev.price) + "</td><td>" + esc(ev.reason) + "</td></tr>";
+      "</td><td>" + esc(ev.symbol) + "</td><td>" + esc(ev.price) + "</td><td>" + esc(ev.credit == null ? "—" : ev.credit) +
+      "</td><td>" + esc(ev.reason) + (ev.left === true ? " · остаток на книге" : "") + "</td></tr>";
   }
   return html + "</tbody>";
 }
 function shown(value) {
   if (typeof value === "string") return value;
+  return money(value);
+}
+function money(value) {
+  if (typeof value === "string") return value;
   return usdt(value);
 }
 function usdt(micro) {
-  if (micro === undefined || micro === null) return "—";
+  if (typeof micro === "boolean" || micro === undefined || micro === null) return "—";
   const n = Number(micro);
   const sign = n < 0 ? "-" : "";
   const abs = Math.abs(n);

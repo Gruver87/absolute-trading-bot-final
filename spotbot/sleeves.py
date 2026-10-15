@@ -16,7 +16,7 @@ from spotbot.config import Config
 from spotbot.engine import run_cycle
 from spotbot.mexc import MexcClient, MexcError, MexcRateLimit
 from spotbot.money import format_usdt
-from spotbot.state import load_book, save_book, structure_too_deep, usdt_symbol_ok, write_atomic
+from spotbot.state import Book, LedgerError, load_book, save_book, structure_too_deep, usdt_symbol_ok, write_atomic
 
 LOG = logging.getLogger("spotbot")
 
@@ -132,6 +132,15 @@ def sleeve_symbols() -> tuple[str, ...]:
     return tuple(out)
 
 
+def _load_funding_book(path: Path) -> Book | None:
+    """The sleeve book, or None when the file cannot be used. The file is not replaced."""
+    try:
+        return load_book(path, 0)
+    except LedgerError as exc:
+        LOG.error("sleeve book was not read; cash stays where it is: %s", str(exc)[:180])
+        return None
+
+
 def apply_funding(data_dir: Path, main_micro: int, live: bool = False) -> tuple[int, ...]:
     """Add only the new main-balance delta. Existing sleeve cash is kept."""
     sleeve_symbols()
@@ -154,7 +163,12 @@ def apply_funding(data_dir: Path, main_micro: int, live: bool = False) -> tuple[
     for index, sleeve in enumerate(SLEEVES):
         path = data_dir / f"sleeve_{sleeve.name}.json"
         existed = path.exists()
-        book = load_book(path, 0)
+        if not existed and funded > 0:
+            LOG.error("sleeve %s book is missing; its cash is not rebuilt", sleeve.name)
+            return tuple(0 for _ in SLEEVES)
+        book = _load_funding_book(path)
+        if book is None:
+            return tuple(0 for _ in SLEEVES)
         credited = book.credited_main_micro
         if credited is None:
             credited = funded if existed else 0
@@ -182,7 +196,9 @@ def apply_funding(data_dir: Path, main_micro: int, live: bool = False) -> tuple[
     for index, sleeve in enumerate(SLEEVES):
         path = data_dir / f"sleeve_{sleeve.name}.json"
         existed = path.exists()
-        book = load_book(path, 0)
+        book = _load_funding_book(path)
+        if book is None:
+            return tuple(parts) + tuple(0 for _ in range(len(SLEEVES) - len(parts)))
         if book.credited_main_micro is None:
             if existed and not treasury_exists:
                 raise SleeveError("sleeve book has no funding mark and treasury is missing")
@@ -216,7 +232,10 @@ def apply_funding(data_dir: Path, main_micro: int, live: bool = False) -> tuple[
 
 def run_sleeves(cfg: Config, client: MexcClient, data_dir: Path) -> None:
     """One pass over major, alt, then meme. Books do not share cash."""
-    apply_funding(data_dir, cfg.paper_cash_micro, live=cfg.live)
+    if cfg.live:
+        LOG.warning("live sleeves are not funded from the paper balance")
+    else:
+        apply_funding(data_dir, cfg.paper_cash_micro, live=False)
     books = ledger_dir(data_dir, cfg.live)
     paths = {sleeve.name: books / f"sleeve_{sleeve.name}.json" for sleeve in SLEEVES}
     for sleeve in SLEEVES:
@@ -229,6 +248,9 @@ def run_sleeves(cfg: Config, client: MexcClient, data_dir: Path) -> None:
         )
         path = paths[sleeve.name]
         siblings = tuple(item for name, item in paths.items() if name != sleeve.name)
+        if not path.is_file():
+            LOG.error("sleeve %s book is missing; its cash is not rebuilt", sleeve.name)
+            continue
         LOG.info("sleeve=%s symbols=%s", sleeve.name, ",".join(sleeve.symbols))
         try:
             run_cycle(child, client, path, book_name=sleeve.name, sibling_paths=siblings)
@@ -237,3 +259,5 @@ def run_sleeves(cfg: Config, client: MexcClient, data_dir: Path) -> None:
             raise
         except MexcError as exc:
             LOG.error("sleeve %s failed closed: %s", sleeve.name, str(exc)[:180])
+        except LedgerError as exc:
+            LOG.error("sleeve %s book was not read; the other sleeves still run: %s", sleeve.name, str(exc)[:180])

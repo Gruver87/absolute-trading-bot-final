@@ -91,7 +91,8 @@ def run_cycle(
 ) -> CycleReport:
     require_cycle_config(cfg)
     client.forget_rules()
-    book = load_book(path, cfg.paper_cash_micro)
+    opening = 0 if cfg.live else cfg.paper_cash_micro
+    book = load_book(path, opening)
     bind_ledger(book, cfg.live)
     name = _shown_name(book_name, path)
     exits, entries, skipped = 0, 0, 0
@@ -100,6 +101,7 @@ def run_cycle(
     pending_problem = None
     conflict = None
     orders_allowed = False
+    finished = False
     try:
         _roll_guard(book)
         clock_ok = _clock_ok(client) if cfg.live else True
@@ -144,7 +146,7 @@ def run_cycle(
             LOG.warning("live orders paused book=%s", name)
         if not cfg.entries:
             LOG.warning(
-                "entries off book=%s: the measured rule does not beat fees and the spread",
+                "entries off book=%s: the sign does not hold across windows",
                 name,
             )
         if halt or conflict or pending_problem or cooled or other_pending or not orders_allowed or not cfg.entries:
@@ -157,9 +159,11 @@ def run_cycle(
         LOG.warning("rate limit, cycle stopped and the book is kept: %s", _short(str(exc)))
     else:
         limited = None
+        finished = True
     finally:
         save_book(path, book)
-        note_heartbeat(ops_root(path), name)
+        if finished:
+            note_heartbeat(ops_root(path), name)
     LOG.info(
         "cash=%s realized=%s fees=%s positions=%s exits=%s entries=%s skipped=%s live=%s",
         format_usdt(book.cash_micro),
@@ -259,6 +263,18 @@ def _unseen(book: Book, now: int, interval_sec: int) -> bool:
     return now - book.seen_at > max(interval_sec * 2, 180)
 
 
+def _covers_cost(client: MexcClient, pos: Position, bid: int) -> bool:
+    """True only when a sell at this bid returns at least the coins' cost."""
+    return _under_cost(client, pos, bid) is False
+
+
+def _early_exit_covers(client: MexcClient, pos: Position, bid: int, reason: str) -> bool:
+    """A stop, trail, or take may sell at a loss. An early exit may not."""
+    if reason not in ("mexc_ahead", "ask_wall"):
+        return True
+    return _covers_cost(client, pos, bid)
+
+
 def _under_cost(client: MexcClient, pos: Position, bid: int) -> bool | None:
     """True when a sell at this bid would return less than the coins cost. None if the fee is unknown."""
     try:
@@ -267,7 +283,10 @@ def _under_cost(client: MexcClient, pos: Position, bid: int) -> bool | None:
         raise
     except MexcError:
         return None
-    gross = notional_micro(pos.base_atoms, bid)
+    try:
+        gross = notional_micro(pos.base_atoms, bid)
+    except MoneyError:
+        return None
     credit, fee = paper_sell(pos.base_atoms, bid, taker_bps)
     if credit < 0 or fee < 0 or credit + fee != gross:
         return None
@@ -326,6 +345,10 @@ def _close_positions(
     for pos in list(book.positions):
         step = _lot_step(client, pos.symbol)
         dust = step is not None and not uses_slot(pos.base_atoms, step)
+        if step is not None and not dust:
+            pos.below_lot = False
+        if dust:
+            pos.below_lot = True
         try:
             bid, _ask = client.book_top(pos.symbol)
         except MexcRateLimit:
@@ -347,7 +370,7 @@ def _close_positions(
         if _gap_hold(cfg, client, book, pos, price):
             kept.append(pos)
             continue
-        if price > pos.peak_micro:
+        if not dust and price > pos.peak_micro:
             pos.peak_micro = price
         if dust:
             kept.append(pos)
@@ -367,12 +390,17 @@ def _close_positions(
                 LOG.warning("depth failed, position kept: %s", _short(str(exc)))
                 kept.append(pos)
                 continue
-            if ask_wall_exit(bid_notional, ask_notional, pnl_bps(pos.entry_micro, price)):
+            if ask_wall_exit(bid_notional, ask_notional, pnl_bps(pos.entry_micro, price)) and _covers_cost(
+                client, pos, price
+            ):
                 reason = "ask_wall"
-        quotes = venue_quotes(pos.symbol)
-        _log_oracle(pos.symbol, price, quotes, data_dir)
-        if reason is None and ahead_exit(price, list(quotes.values()), pnl_bps(pos.entry_micro, price)):
-            reason = "mexc_ahead"
+        if reason is None:
+            quotes = venue_quotes(pos.symbol)
+            _log_oracle(pos.symbol, price, quotes, data_dir)
+            if ahead_exit(price, list(quotes.values()), pnl_bps(pos.entry_micro, price)) and _covers_cost(
+                client, pos, price
+            ):
+                reason = "mexc_ahead"
         if reason is None:
             kept.append(pos)
             continue
@@ -456,6 +484,10 @@ def _close_positions(
                 pos.peak_micro = started_peak
                 kept.append(pos)
                 continue
+            if not _early_exit_covers(client, pos, price, reason):
+                LOG.info("exit cancelled, the bid does not cover the cost %s", pos.symbol)
+                kept.append(pos)
+                continue
             client_id = new_client_order_id(pos.symbol, "S")
             remember_pending(book, client_id, pos.symbol, "SELL", sell_atoms)
             book.pending_open_base = pos.base_atoms
@@ -520,21 +552,16 @@ def _close_positions(
             if fill.base_atoms <= 0 or not apply_sell_progress(book, pos.symbol, fill.base_atoms, gross, fee):
                 kept.append(pos)
                 continue
-            if any(item.symbol == pos.symbol for item in book.positions):
+            left = any(item.symbol == pos.symbol for item in book.positions)
+            if left:
+                if not uses_slot(pos.base_atoms, rule.base_step_atoms):
+                    pos.below_lot = True
                 kept.append(pos)
             clear_pending(book)
             mark_stop_cooldown(book, reason, cfg.stop_cooldown_sec, pos.symbol, cfg.stop_lock_count, cfg.stop_lock_sec)
             save_book(path, book)
             closed += 1
-            LOG.info("exit %s %s price=%s", reason, pos.symbol, _shown_price(price))
-            note_event(
-                data_dir,
-                book=book_name,
-                kind="exit",
-                symbol=pos.symbol,
-                reason=reason,
-                price=_shown_price(price),
-            )
+            _note_exit(data_dir, book_name, reason, pos.symbol, price, credit, fee, left)
             continue
         try:
             rule = client.symbol_rule(pos.symbol)
@@ -577,8 +604,17 @@ def _close_positions(
             pos.peak_micro = started_peak
             kept.append(pos)
             continue
-        credit, fee = paper_sell(sell_atoms, price, taker_bps)
-        gross = notional_micro(sell_atoms, price)
+        if not _early_exit_covers(client, pos, price, reason):
+            LOG.info("exit cancelled, the bid does not cover the cost %s", pos.symbol)
+            kept.append(pos)
+            continue
+        try:
+            credit, fee = paper_sell(sell_atoms, price, taker_bps)
+            gross = notional_micro(sell_atoms, price)
+        except MoneyError:
+            LOG.warning("paper sell credit refused, position kept: %s", pos.symbol)
+            kept.append(pos)
+            continue
         if credit <= 0 or fee < 0 or credit + fee != gross:
             LOG.warning("paper sell credit refused, position kept: %s", pos.symbol)
             kept.append(pos)
@@ -586,20 +622,15 @@ def _close_positions(
         if not record_sell_fill(book, pos.symbol, sell_atoms, credit, fee, pos):
             kept.append(pos)
             continue
-        if any(item.symbol == pos.symbol for item in book.positions):
+        left = any(item.symbol == pos.symbol for item in book.positions)
+        if left:
+            if not uses_slot(pos.base_atoms, step):
+                pos.below_lot = True
             kept.append(pos)
         mark_stop_cooldown(book, reason, cfg.stop_cooldown_sec, pos.symbol, cfg.stop_lock_count, cfg.stop_lock_sec)
         save_book(path, book)
         closed += 1
-        LOG.info("exit %s %s price=%s", reason, pos.symbol, _shown_price(price))
-        note_event(
-            data_dir,
-            book=book_name,
-            kind="exit",
-            symbol=pos.symbol,
-            reason=reason,
-            price=_shown_price(price),
-        )
+        _note_exit(data_dir, book_name, reason, pos.symbol, price, credit, fee, left)
     book.positions = kept
     if not unmarked:
         book.seen_at = _now_sec()
@@ -1412,11 +1443,20 @@ def open_loss_micro(
     """How far open positions sit below their cost. Gains are not subtracted.
 
     With taker rates the value is the bid after the sell fee.
+    A coin below the lot step is a loss of its whole cost: the bid cannot be taken.
     """
     if not isinstance(positions, list) or len(positions) > 8:
         return 2**62
     loss = 0
     for pos in positions:
+        if getattr(pos, "below_lot", False) is True:
+            cost = pos.quote_micro
+            if isinstance(cost, bool) or not isinstance(cost, int) or cost < 0 or cost >= 10**24:
+                return 2**62
+            loss += cost
+            if loss >= 10**24:
+                return 2**62
+            continue
         price = marks.get(pos.symbol, 0)
         if isinstance(pos.quote_micro, bool):
             return 2**62
@@ -1598,6 +1638,39 @@ def _shown_price(price: object) -> str:
         return format_price(price)
     except MoneyError:
         return "unreadable"
+
+
+def _note_exit(
+    data_dir: Path,
+    book_name: str,
+    reason: str,
+    symbol: str,
+    price: int,
+    credit: int,
+    fee: int,
+    left: bool,
+) -> None:
+    """The journal shows the cash that landed, and whether the coin is still on the book."""
+    LOG.info(
+        "exit %s %s price=%s credit=%s fee=%s%s",
+        reason,
+        symbol,
+        _shown_price(price),
+        _shown_usdt(credit),
+        _shown_usdt(fee),
+        " left" if left else "",
+    )
+    note_event(
+        data_dir,
+        book=book_name,
+        kind="exit",
+        symbol=symbol,
+        reason=reason,
+        price=_shown_price(price),
+        credit=_shown_usdt(credit),
+        fee=_shown_usdt(fee),
+        left=left,
+    )
 
 
 def _shown_usdt(micro: object) -> str:

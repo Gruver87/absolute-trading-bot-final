@@ -26,10 +26,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--symbol", default="BTCUSDT")
     parser.add_argument("--limit", type=int, default=500)
     parser.add_argument("--sleeves", action="store_true", help="replay the fixed 14 pairs and print the median")
+    parser.add_argument("--end-ms", type=int, default=0, help="replay candles that closed at or before this time")
+    parser.add_argument("--mean-pays", action="store_true", help="buy a reclaim only when the 20-bar mean clears the round trip")
+    parser.add_argument("--range-pays", action="store_true", help="buy a lift only when that bar's range clears the round trip")
+    parser.add_argument("--rise-pays", action="store_true", help="buy a rise that already cleared the round trip, instead of a reclaim")
     args = parser.parse_args(argv)
     if args.limit < 80 or args.limit > 1000:
         print("limit must be 80..1000", file=sys.stderr)
         return 2
+    if isinstance(args.end_ms, bool) or not isinstance(args.end_ms, int) or args.end_ms < 0 or args.end_ms >= 10**15:
+        print("end-ms is not a timestamp", file=sys.stderr)
+        return 2
+    if args.rise_pays and args.mean_pays:
+        print("rise-pays and mean-pays are different entries", file=sys.stderr)
+        return 2
+    if args.rise_pays:
+        print("entry=rise: the reclaim is not used")
     symbols = list(sleeve_symbols()) if args.sleeves else [args.symbol.upper()]
     later_rsi: list[tuple[str, int]] = []
     later_lift: list[tuple[str, int]] = []
@@ -38,6 +50,18 @@ def main(argv: list[str] | None = None) -> int:
     zero_fee: list[str] = []
     left_out: list[str] = []
     client = MexcClient()
+    if args.end_ms:
+        try:
+            latest_open = client.server_time_ms() - args.limit * 300_000
+        except MexcRateLimit as exc:
+            print(f"replay stopped on rate limit: {exc}", file=sys.stderr)
+            return 1
+        except MexcError as exc:
+            print(f"replay failed: clock {exc}", file=sys.stderr)
+            return 1
+        if args.end_ms > latest_open:
+            print("end-ms overlaps the already measured latest bars", file=sys.stderr)
+            return 2
     for index, symbol in enumerate(symbols):
         if index:
             time.sleep(0.2)
@@ -51,7 +75,10 @@ def main(argv: list[str] | None = None) -> int:
                 left_out.append(symbol)
                 print(f"{symbol}: {reason}; left out of the median")
                 continue
-            stamped = client.ohlcv_stamped(symbol, "5m", args.limit)
+            if args.end_ms:
+                stamped = client.ohlcv_stamped_until(symbol, "5m", args.limit, args.end_ms)
+            else:
+                stamped = client.ohlcv_stamped(symbol, "5m", args.limit)
             if len(stamped) >= 2:
                 stamped = stamped[:-1]
             if len(stamped) < 2:
@@ -93,6 +120,9 @@ def main(argv: list[str] | None = None) -> int:
                 opens=opens[:cut],
                 minute_closes=minutes,
                 bar_open_ms=open_ms[:cut],
+                require_mean=args.mean_pays,
+                require_range=args.range_pays,
+                require_rise=args.rise_pays,
             )
             rsi_net, lift_net = _run_pair(
                 "later",
@@ -107,6 +137,9 @@ def main(argv: list[str] | None = None) -> int:
                 opens=opens,
                 minute_closes=minutes,
                 bar_open_ms=open_ms,
+                require_mean=args.mean_pays,
+                require_range=args.range_pays,
+                require_rise=args.rise_pays,
             )
             if e_rsi is not None:
                 earlier_rsi.append((symbol, e_rsi))
@@ -129,6 +162,9 @@ def main(argv: list[str] | None = None) -> int:
                 opens=opens,
                 minute_closes=minutes,
                 bar_open_ms=open_ms,
+                require_mean=args.mean_pays,
+                require_range=args.range_pays,
+                require_rise=args.rise_pays,
             )
     if args.sleeves:
         _print_median("earlier rsi", [net for _symbol, net in earlier_rsi])
@@ -143,6 +179,10 @@ def main(argv: list[str] | None = None) -> int:
             print("zero taker left out: " + ",".join(zero_fee))
         if left_out:
             print("no lot left out: " + ",".join(left_out))
+        if _four_positive(earlier_rsi, earlier_lift, later_rsi, later_lift):
+            print("all four medians are positive; entries stay off until that sign holds on the next window too")
+        else:
+            print("entries stay off: both halves of both rules are not above zero together")
         print("median is closed trades plus the open mark; a positive median does not rest a limit or open the book socket")
     elif later_rsi or later_lift:
         print("both slices use the same fixed rule; a positive slice does not rest a limit or open the book socket")
@@ -164,6 +204,9 @@ def _run_pair(
     opens: list[int] | None = None,
     minute_closes: list[tuple[int, int]] | None = None,
     bar_open_ms: list[int] | None = None,
+    require_mean: bool = False,
+    require_range: bool = False,
+    require_rise: bool = False,
 ) -> tuple[int | None, int | None]:
     cash = parse_micro("1000")
     floor = parse_micro("3")
@@ -192,6 +235,8 @@ def _run_pair(
         lock_count=3,
         minute_closes=minute_closes,
         bar_open_ms=bar_open_ms,
+        require_mean=require_mean,
+        require_rise=require_rise,
         )
         _print_result(f"rsi:{label}", symbol, len(traded), result, taker_bps)
         _print_hold(label, symbol, traded, result, taker_bps, base_step_atoms, floor)
@@ -219,6 +264,7 @@ def _run_pair(
         lock_count=3,
         minute_closes=minute_closes,
         bar_open_ms=bar_open_ms,
+        require_range=require_range,
         )
         _print_result(f"lift-candles:{label}", symbol, len(traded_bars), lift, taker_bps)
         if median:
@@ -315,6 +361,15 @@ def _sleeve_values(rows: list[tuple[str, int]]) -> list[tuple[str, list[int]]]:
 def _print_sleeve_medians(label: str, rows: list[tuple[str, int]]) -> None:
     for name, values in _sleeve_values(rows):
         _print_median(f"{label} {name}", values)
+
+
+def _four_positive(*groups: list[tuple[str, int]]) -> bool:
+    """True only when each pooled median is strictly above zero. One window is not a live switch."""
+    for group in groups:
+        mid = median_micro([net for _symbol, net in group])
+        if mid is None or mid <= 0:
+            return False
+    return True
 
 
 def _print_median(label: str, values: list[int]) -> None:

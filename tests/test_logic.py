@@ -489,6 +489,15 @@ def test_a_json_float_is_not_a_price() -> None:
     else:
         raise AssertionError("a JSON float is not a trade")
     assert "function esc(" in _PAGE
+    assert "новые покупки выключены" in _PAGE
+    assert 'name.endsWith("/treasury")' in _PAGE
+    assert "Array.isArray(book.positions)" in _PAGE
+    assert 'typeof q !== "object"' in _PAGE
+    assert "удержание, ниже себестоимости не продаётся" in _PAGE
+    assert "p.hold_flat === true" in _PAGE
+    assert "меньше шага лота, продажа не уходит" in _PAGE
+    assert "зачислено" in _PAGE
+    assert "остаток на книге" in _PAGE
 
 
 def test_exchange_filters_refuse_a_json_float() -> None:
@@ -3275,8 +3284,46 @@ def test_a_pair_without_a_lot_does_not_stop_the_median(monkeypatch, capsys) -> N
     monkeypatch.setattr("spotbot.replay_main.MexcClient", _Client)
     monkeypatch.setattr("spotbot.replay_main.time.sleep", lambda _sec: None)
     assert main(["--sleeves", "--limit", "160"]) == 0
-    assert "PEPEUSDT" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "PEPEUSDT" in out
+    assert "entries stay off" in out
     assert main(["--symbol", "PEPEUSDT", "--limit", "160"]) == 1
+
+
+def test_rise_and_mean_are_not_one_entry() -> None:
+    from spotbot.replay_main import main
+
+    assert main(["--symbol", "BTCUSDT", "--limit", "80", "--rise-pays", "--mean-pays"]) == 2
+
+
+def test_one_positive_half_does_not_open_entries() -> None:
+    from spotbot.replay_main import _four_positive
+
+    plus = [("BTCUSDT", 1)]
+    zero = [("BTCUSDT", 0)]
+    minus = [("BTCUSDT", -1)]
+    assert _four_positive(plus, plus, plus, plus) is True
+    assert _four_positive(plus, plus, plus, zero) is False
+    assert _four_positive(plus, plus, plus, minus) is False
+    assert _four_positive(plus, plus, plus, []) is False
+
+
+def test_an_end_inside_the_latest_window_is_not_a_new_tape(monkeypatch, capsys) -> None:
+    from spotbot.mexc import _row_closed
+    from spotbot.replay_main import main
+
+    class _Clock:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+        def server_time_ms(self) -> int:
+            return 2_000_000_000_000
+
+    monkeypatch.setattr("spotbot.replay_main.MexcClient", _Clock)
+    assert main(["--symbol", "BTCUSDT", "--limit", "80", "--end-ms", "2000000000000"]) == 2
+    assert "overlaps" in capsys.readouterr().err
+    assert _row_closed([1_000, "1", "1", "1", "1", "1", 1_299, "1"], 300, 1_300) is True
+    assert _row_closed([1_000, "1"], 300, 1_299) is False
 
 
 def test_the_env_cannot_turn_entries_on(monkeypatch) -> None:
@@ -3327,6 +3374,38 @@ def test_flat_round_trip_loses_the_taker_fee() -> None:
     assert buy_fee == 100_000
     assert sell_fee > 0
     assert credit - spend < 0
+
+
+def test_a_bar_narrower_than_the_round_trip_is_not_a_lift() -> None:
+    from spotbot.liquidity import range_pays
+
+    fill = 1_000_000_000_000
+    assert range_pays(fill + 1, fill, fill, 30, 5) is False
+    assert range_pays(fill + fill // 5, fill, fill, 30, 5) is True
+    assert range_pays(fill + fill // 5, fill, fill, 30, True) is False
+
+
+def test_a_rise_smaller_than_the_round_trip_is_not_a_buy() -> None:
+    from spotbot.signals import rise_pays
+
+    base = 1_000_000_000_000
+    flat = [base] * 21
+    assert rise_pays(flat, base, 30, 5) is False
+    tiny = [base] * 20 + [base + base // 10_000]
+    assert rise_pays(tiny, tiny[-1], 30, 5) is False
+    rose = [base] * 20 + [base + base // 10]
+    assert rise_pays(rose, rose[-1], 30, 5) is True
+    assert rise_pays(rose, rose[-1], 30, True) is False
+
+
+def test_a_mean_that_cannot_pay_the_round_trip_is_not_a_buy() -> None:
+    from spotbot.signals import mean_pays
+
+    flat = [1_000_000_000_000] * 20
+    assert mean_pays(flat, flat[-1], 30, 5) is False
+    wide = [1_100_000_000_000] * 20
+    assert mean_pays(wide, 1_000_000_000_000, 30, 5) is True
+    assert mean_pays(wide, 1_000_000_000_000, 30, True) is False
 
 
 def test_an_ask_back_under_the_band_is_not_bought(tmp_path) -> None:
@@ -3773,6 +3852,55 @@ def test_corrupt_book_does_not_open(tmp_path) -> None:
         pass
     else:
         raise AssertionError("a buy row with the wrong cost must not open")
+
+
+def test_a_live_cycle_does_not_open_with_paper_cash(tmp_path, monkeypatch) -> None:
+    from spotbot.config import Config
+    from spotbot.engine import run_cycle
+    from spotbot.sleeves import run_sleeves
+    from spotbot.state import load_book
+
+    class _Live:
+        def forget_rules(self) -> None:
+            return None
+
+        def server_time_ms(self) -> int:
+            return 1
+
+        def spot_balances(self) -> tuple[int, int, dict[str, int], dict[str, int]]:
+            return 0, 0, {}, {}
+
+    monkeypatch.setattr("spotbot.engine.clock_allows", lambda *_args: True)
+    cfg = Config(
+        symbols=("BTCUSDT",),
+        paper_cash_micro=1_000_000_000,
+        interval_sec=60,
+        max_positions=1,
+        alloc_bps=10_000,
+        min_notional_micro=1_000_000,
+        rsi_buy=35,
+        stop_bps=350,
+        take_bps=700,
+        trail_arm_bps=300,
+        trail_gap_bps=200,
+        live=True,
+        mode="rsi",
+        taker_bps=5,
+        daily_loss_bps=500,
+        stop_cooldown_sec=900,
+        symbol_lock=True,
+        api_key="",
+        api_secret="",
+        entries=False,
+    )
+    path = tmp_path / "live.json"
+    run_cycle(cfg, _Live(), path)
+    assert load_book(path, 1).cash_micro == 0
+    funded: list[int] = []
+    monkeypatch.setattr("spotbot.sleeves.apply_funding", lambda *_args, **_kwargs: funded.append(1))
+    monkeypatch.setattr("spotbot.sleeves.run_cycle", lambda *_args, **_kwargs: None)
+    run_sleeves(cfg, object(), tmp_path / "sleeves")
+    assert funded == []
 
 
 def test_live_ledger_does_not_spend_paper_cash(tmp_path) -> None:
@@ -4677,6 +4805,347 @@ def test_daily_loss_stops_new_entries() -> None:
     assert _entries_halted(flat, 500) is False
 
 
+def test_a_stop_does_not_wait_for_the_other_books(tmp_path) -> None:
+    from spotbot.config import Config
+    from spotbot.engine import _close_positions, _now_sec
+    from spotbot.rules import SymbolRule
+    from spotbot.state import Book, Position
+
+    calls: list[str] = []
+
+    class _Book:
+        def __init__(self, bid: int) -> None:
+            self.bid = bid
+
+        def symbol_rule(self, symbol: str) -> SymbolRule:
+            return SymbolRule(symbol, True, "", 5, 1, 1, 0, "BTC")
+
+        def book_top(self, _symbol: str) -> tuple[int, int]:
+            return self.bid, self.bid + 1
+
+        def venue_quotes(self, symbol: str) -> dict[str, int]:
+            calls.append(symbol)
+            raise AssertionError("a stop must not wait for another exchange")
+
+    cfg = Config(
+        symbols=("BTCUSDT",),
+        paper_cash_micro=0,
+        interval_sec=60,
+        max_positions=1,
+        alloc_bps=10_000,
+        min_notional_micro=1,
+        rsi_buy=35,
+        stop_bps=350,
+        take_bps=700,
+        trail_arm_bps=300,
+        trail_gap_bps=200,
+        live=False,
+        mode="rsi",
+        taker_bps=5,
+        daily_loss_bps=500,
+        stop_cooldown_sec=0,
+        symbol_lock=True,
+        api_key="",
+        api_secret="",
+    )
+    entry = 100_000_000_000_000
+    book = Book(
+        cash_micro=0,
+        positions=[Position("BTCUSDT", entry, entry, 10_000_000, 100_000_000, "test")],
+        realized_micro=0,
+        seen_at=_now_sec(),
+    )
+    import spotbot.engine as engine
+
+    engine.venue_quotes = _Book(0).venue_quotes  # type: ignore[method-assign]
+    try:
+        closed, _marks, unmarked = _close_positions(
+            cfg, _Book(90_000_000_000_000), book, tmp_path / "stop.json", "book", True
+        )
+    finally:
+        from spotbot.oracle import venue_quotes
+
+        engine.venue_quotes = venue_quotes
+    assert unmarked == ()
+    assert closed == 1 and book.positions == []
+    assert calls == []
+
+    flat = Book(
+        cash_micro=0,
+        positions=[Position("BTCUSDT", entry, entry, 10_000_000, 100_000_000, "test")],
+        realized_micro=0,
+        seen_at=_now_sec(),
+    )
+
+    def _peers(symbol: str) -> dict[str, int]:
+        calls.append(symbol)
+        return {}
+
+    engine.venue_quotes = _peers  # type: ignore[method-assign]
+    try:
+        closed, _marks, unmarked = _close_positions(
+            cfg, _Book(entry), flat, tmp_path / "flat.json", "book", True
+        )
+    finally:
+        from spotbot.oracle import venue_quotes
+
+        engine.venue_quotes = venue_quotes
+    assert unmarked == ()
+    assert closed == 0 and flat.positions
+    assert calls == ["BTCUSDT"]
+
+
+def test_one_unpriceable_coin_does_not_block_the_other_sell(tmp_path) -> None:
+    from spotbot.config import Config
+    from spotbot.engine import _close_positions, _now_sec
+    from spotbot.rules import SymbolRule
+    from spotbot.state import Book, Position
+
+    class _Book:
+        def symbol_rule(self, symbol: str) -> SymbolRule:
+            base = "ETH" if symbol == "ETHUSDT" else "BTC"
+            return SymbolRule(symbol, True, "", 5, 1, 1, 0, base)
+
+        def book_top(self, symbol: str) -> tuple[int, int]:
+            if symbol == "ETHUSDT":
+                return 10**16, 10**16 + 1
+            return 90_000_000_000_000, 90_000_000_000_001
+
+    cfg = Config(
+        symbols=("ETHUSDT", "BTCUSDT"),
+        paper_cash_micro=0,
+        interval_sec=60,
+        max_positions=2,
+        alloc_bps=10_000,
+        min_notional_micro=1,
+        rsi_buy=35,
+        stop_bps=350,
+        take_bps=700,
+        trail_arm_bps=300,
+        trail_gap_bps=200,
+        live=False,
+        mode="rsi",
+        taker_bps=5,
+        daily_loss_bps=500,
+        stop_cooldown_sec=0,
+        symbol_lock=True,
+        api_key="",
+        api_secret="",
+    )
+    book = Book(
+        cash_micro=0,
+        positions=[
+            Position("ETHUSDT", 2 * 10**16, 2 * 10**16, 1, 10**23, "test"),
+            Position("BTCUSDT", 100_000_000_000_000, 100_000_000_000_000, 10_000_000, 100_000_000, "test"),
+        ],
+        realized_micro=0,
+        seen_at=_now_sec(),
+    )
+    closed, _marks, unmarked = _close_positions(cfg, _Book(), book, tmp_path / "two.json", "book", True)
+    assert unmarked == ()
+    assert closed == 1
+    assert [pos.symbol for pos in book.positions] == ["ETHUSDT"]
+    assert book.cash_micro > 0
+
+
+def test_an_early_exit_does_not_sell_below_cost(tmp_path) -> None:
+    from spotbot.config import Config
+    from spotbot.engine import _close_positions, _now_sec
+    from spotbot.fees import paper_sell
+    from spotbot.rules import SymbolRule
+    from spotbot.state import Book, Position
+
+    entry = 100_000_000_000_000
+    bid = 100_400_000_000_000
+    peer = 100_000_000_000_000
+
+    class _Book:
+        def symbol_rule(self, symbol: str) -> SymbolRule:
+            return SymbolRule(symbol, True, "", 5, 1, 1, 0, "BTC")
+
+        def book_top(self, _symbol: str) -> tuple[int, int]:
+            return bid, bid + 1
+
+    import spotbot.engine as engine
+    from spotbot.oracle import venue_quotes
+
+    engine.venue_quotes = lambda _symbol: {"binance": peer}  # type: ignore[method-assign]
+    cfg = Config(
+        symbols=("BTCUSDT",),
+        paper_cash_micro=0,
+        interval_sec=60,
+        max_positions=1,
+        alloc_bps=10_000,
+        min_notional_micro=1,
+        rsi_buy=35,
+        stop_bps=350,
+        take_bps=700,
+        trail_arm_bps=300,
+        trail_gap_bps=200,
+        live=False,
+        mode="rsi",
+        taker_bps=5,
+        daily_loss_bps=500,
+        stop_cooldown_sec=0,
+        symbol_lock=True,
+        api_key="",
+        api_secret="",
+    )
+    try:
+        costly = Book(
+            cash_micro=0,
+            positions=[Position("BTCUSDT", entry, entry, 100_400_000, 100_000_000, "test")],
+            realized_micro=0,
+            seen_at=_now_sec(),
+        )
+        closed, _marks, unmarked = _close_positions(cfg, _Book(), costly, tmp_path / "cost.json", "book", True)
+        assert unmarked == ()
+        assert closed == 0 and costly.cash_micro == 0 and len(costly.positions) == 1
+        cheap = Book(
+            cash_micro=0,
+            positions=[Position("BTCUSDT", entry, entry, 100_000_000, 100_000_000, "test")],
+            realized_micro=0,
+            seen_at=_now_sec(),
+        )
+        closed, _marks, unmarked = _close_positions(cfg, _Book(), cheap, tmp_path / "green.json", "book", True)
+        credit, _fee = paper_sell(100_000_000, bid, 5)
+        assert unmarked == ()
+        assert closed == 1 and cheap.positions == [] and cheap.cash_micro == credit
+    finally:
+        engine.venue_quotes = venue_quotes
+
+
+def test_a_partial_sell_says_the_coin_remains(tmp_path) -> None:
+    from spotbot.config import Config
+    from spotbot.engine import _close_positions, _now_sec
+    from spotbot.fees import paper_sell
+    from spotbot.rules import SymbolRule
+    from spotbot.state import Book, Position
+
+    entry = 100_000_000_000_000
+    bid = 90_000_000_000_000
+    step = 100_000_000
+    base = 150_000_000
+
+    class _Book:
+        def symbol_rule(self, symbol: str) -> SymbolRule:
+            return SymbolRule(symbol, True, "", 5, step, 1, 0, "BTC")
+
+        def book_top(self, _symbol: str) -> tuple[int, int]:
+            return bid, bid + 1
+
+    cfg = Config(
+        symbols=("BTCUSDT",),
+        paper_cash_micro=0,
+        interval_sec=60,
+        max_positions=1,
+        alloc_bps=10_000,
+        min_notional_micro=1,
+        rsi_buy=35,
+        stop_bps=350,
+        take_bps=700,
+        trail_arm_bps=300,
+        trail_gap_bps=200,
+        live=False,
+        mode="rsi",
+        taker_bps=5,
+        daily_loss_bps=500,
+        stop_cooldown_sec=0,
+        symbol_lock=True,
+        api_key="",
+        api_secret="",
+    )
+    book = Book(
+        cash_micro=0,
+        positions=[Position("BTCUSDT", entry, entry, 15_000_000, base, "test")],
+        realized_micro=0,
+        seen_at=_now_sec(),
+    )
+    closed, _marks, unmarked = _close_positions(cfg, _Book(), book, tmp_path / "part.json", "book", True)
+    credit, fee = paper_sell(step, bid, 5)
+    assert unmarked == ()
+    assert closed == 1
+    assert book.cash_micro == credit and book.fees_micro == fee
+    assert len(book.positions) == 1 and book.positions[0].base_atoms == base - step
+    assert book.positions[0].below_lot is True
+    assert book.positions[0].quote_micro == 5_000_000
+    text = (tmp_path / "ops_events.jsonl").read_text(encoding="utf-8")
+    assert '"left": true' in text
+
+
+def test_a_coin_below_the_lot_is_not_counted_as_cash() -> None:
+    from spotbot.engine import open_loss_micro
+    from spotbot.fees import paper_sell
+    from spotbot.guards import marked_equity
+    from spotbot.state import Position
+
+    price = 100_000_000_000_000
+    dust = Position("BTCUSDT", price, price, 5_000_000, 50_000_000, "test", below_lot=True)
+    live = Position("ETHUSDT", price, price, 1, 100_000_000, "test")
+    marks = {"BTCUSDT": price, "ETHUSDT": price}
+    rates = {"BTCUSDT": 5, "ETHUSDT": 5}
+    credit, _fee = paper_sell(100_000_000, price, 5)
+    assert marked_equity(1_000_000, [dust], {}, rates) == 1_000_000
+    assert marked_equity(0, [dust, live], marks, rates) == credit
+    assert open_loss_micro([dust], {}, rates) == 5_000_000
+
+
+def test_a_coin_below_the_lot_does_not_raise_the_peak(tmp_path) -> None:
+    from spotbot.config import Config
+    from spotbot.engine import _close_positions, _now_sec
+    from spotbot.guards import marked_equity
+    from spotbot.mexc import MexcError
+    from spotbot.rules import SymbolRule
+    from spotbot.state import Book, Position
+
+    entry = 100_000_000_000_000
+    bid = 110_000_000_000_000
+    step = 100_000_000
+
+    class _Book:
+        def symbol_rule(self, symbol: str) -> SymbolRule:
+            return SymbolRule(symbol, True, "", 5, step, 1, 0, "BTC")
+
+        def book_top(self, _symbol: str) -> tuple[int, int]:
+            return bid, bid + 1
+
+    class _Down(_Book):
+        def book_top(self, _symbol: str) -> tuple[int, int]:
+            raise MexcError("book down")
+
+    cfg = Config(
+        symbols=("BTCUSDT",),
+        paper_cash_micro=0,
+        interval_sec=60,
+        max_positions=1,
+        alloc_bps=10_000,
+        min_notional_micro=1,
+        rsi_buy=35,
+        stop_bps=350,
+        take_bps=700,
+        trail_arm_bps=300,
+        trail_gap_bps=200,
+        live=False,
+        mode="rsi",
+        taker_bps=5,
+        daily_loss_bps=500,
+        stop_cooldown_sec=0,
+        symbol_lock=True,
+        api_key="",
+        api_secret="",
+    )
+    held = Position("BTCUSDT", entry, entry, 5_000_000, 50_000_000, "test")
+    book = Book(cash_micro=0, positions=[held], realized_micro=0, seen_at=_now_sec())
+    closed, marks, unmarked = _close_positions(cfg, _Book(), book, tmp_path / "dust.json", "book", True)
+    assert closed == 0 and unmarked == ()
+    assert held.peak_micro == entry and held.below_lot is True
+    assert marked_equity(0, book.positions, marks, {"BTCUSDT": 5}) == 0
+    dark = Position("BTCUSDT", entry, entry, 5_000_000, 50_000_000, "test")
+    missed = Book(cash_micro=0, positions=[dark], realized_micro=0, seen_at=1)
+    _close_positions(cfg, _Down(), missed, tmp_path / "dark.json", "book", True)
+    assert dark.below_lot is True and dark.peak_micro == entry
+
+
 def test_new_entries_stay_off_and_exits_still_run(tmp_path, monkeypatch) -> None:
     from spotbot.config import Config, ConfigError, load_config
     from spotbot.engine import run_cycle
@@ -4752,7 +5221,82 @@ def test_new_entries_stay_off_and_exits_still_run(tmp_path, monkeypatch) -> None
     assert report.exits == 1
     assert report.entries == 0
     assert saved.positions == []
-    assert saved.cash_micro > 0
+    from spotbot.fees import paper_sell
+    from spotbot.money import format_usdt
+
+    credit, fee = paper_sell(100_000_000, 90_000_000_000_000, 5)
+    assert saved.cash_micro == credit
+    assert saved.fees_micro == fee
+    assert saved.realized_micro == credit - 10_000_000
+    assert format_usdt(credit) in (tmp_path / "ops_events.jsonl").read_text(encoding="utf-8")
+
+
+def test_a_rate_limit_does_not_look_like_a_finished_cycle(tmp_path) -> None:
+    from spotbot.config import Config
+    from spotbot.engine import run_cycle
+    from spotbot.mexc import MexcRateLimit
+    from spotbot.rules import SymbolRule
+    from spotbot.state import Book, Position, save_book
+
+    path = tmp_path / "book.json"
+    beat = tmp_path / "ops_heartbeat.json"
+    beat.write_text('{"at": "2026-10-15T11:45:53+03:00", "book": "old"}', encoding="utf-8")
+    save_book(
+        path,
+        Book(
+            cash_micro=0,
+            positions=[Position("BTCUSDT", 100_000_000_000_000, 100_000_000_000_000, 10_000_000, 100_000_000, "test")],
+            realized_micro=0,
+        ),
+    )
+
+    class _Limited:
+        def forget_rules(self) -> None:
+            return None
+
+        def symbol_rule(self, symbol: str) -> SymbolRule:
+            return SymbolRule(symbol, True, "", 5, 1, 1, 0, "BTC")
+
+        def book_top(self, _symbol: str) -> tuple[int, int]:
+            raise MexcRateLimit("429")
+
+    cfg = Config(
+        symbols=("BTCUSDT",),
+        paper_cash_micro=1_000_000,
+        interval_sec=60,
+        max_positions=1,
+        alloc_bps=10_000,
+        min_notional_micro=1,
+        rsi_buy=35,
+        stop_bps=350,
+        take_bps=700,
+        trail_arm_bps=300,
+        trail_gap_bps=200,
+        live=False,
+        mode="rsi",
+        taker_bps=5,
+        daily_loss_bps=500,
+        stop_cooldown_sec=0,
+        symbol_lock=True,
+        api_key="",
+        api_secret="",
+    )
+    try:
+        run_cycle(cfg, _Limited(), path)
+    except MexcRateLimit as exc:
+        assert "429" in str(exc)
+    else:
+        raise AssertionError("a rate limit must leave the cycle unfinished")
+    assert '"book": "old"' in beat.read_text(encoding="utf-8")
+
+    class _Quiet:
+        def forget_rules(self) -> None:
+            return None
+
+    save_book(path, Book(cash_micro=1_000_000, positions=[], realized_micro=0))
+    report = run_cycle(cfg, _Quiet(), path)
+    assert report.exits == 0 and report.entries == 0
+    assert '"book": "book"' in beat.read_text(encoding="utf-8")
 
 
 def test_rate_limit_does_not_start_the_next_sleeve(tmp_path, monkeypatch) -> None:
@@ -4808,6 +5352,94 @@ def test_rate_limit_does_not_start_the_next_sleeve(tmp_path, monkeypatch) -> Non
     monkeypatch.setattr("spotbot.sleeves.run_cycle", _continue)
     run_sleeves(cfg, object(), tmp_path)
     assert calls == ["major", "alt", "meme"]
+
+
+def test_one_unreadable_sleeve_does_not_stop_the_others(tmp_path) -> None:
+    from spotbot.config import Config
+    from spotbot.sleeves import apply_funding, run_sleeves
+    from spotbot.state import load_book
+
+    apply_funding(tmp_path, 3_000_000)
+    paper = tmp_path / "paper"
+    alt_before = (paper / "sleeve_alt.json").read_text(encoding="utf-8")
+    (paper / "sleeve_major.json").write_text("{", encoding="utf-8")
+    assert apply_funding(tmp_path, 3_000_000) == (0, 0, 0)
+    assert (paper / "sleeve_major.json").read_text(encoding="utf-8") == "{"
+    assert (paper / "sleeve_alt.json").read_text(encoding="utf-8") == alt_before
+
+    class _Quiet:
+        def forget_rules(self) -> None:
+            return None
+
+    cfg = Config(
+        symbols=("BTCUSDT",),
+        paper_cash_micro=3_000_000,
+        interval_sec=60,
+        max_positions=1,
+        alloc_bps=10_000,
+        min_notional_micro=1,
+        rsi_buy=35,
+        stop_bps=350,
+        take_bps=700,
+        trail_arm_bps=300,
+        trail_gap_bps=200,
+        live=False,
+        mode="rsi",
+        taker_bps=5,
+        daily_loss_bps=500,
+        stop_cooldown_sec=0,
+        symbol_lock=True,
+        api_key="",
+        api_secret="",
+    )
+    run_sleeves(cfg, _Quiet(), tmp_path)
+    assert load_book(paper / "sleeve_alt.json", 0).cash_micro > 0
+    assert load_book(paper / "sleeve_meme.json", 0).cash_micro > 0
+    assert (paper / "sleeve_major.json").read_text(encoding="utf-8") == "{"
+
+
+def test_a_missing_sleeve_is_not_rebuilt_from_the_main_balance(tmp_path) -> None:
+    from spotbot.config import Config
+    from spotbot.sleeves import apply_funding, run_sleeves
+    from spotbot.state import load_book
+
+    apply_funding(tmp_path, 3_000_000)
+    paper = tmp_path / "paper"
+    alt_before = (paper / "sleeve_alt.json").read_text(encoding="utf-8")
+    (paper / "sleeve_major.json").unlink()
+    assert apply_funding(tmp_path, 3_000_000) == (0, 0, 0)
+    assert not (paper / "sleeve_major.json").exists()
+    assert (paper / "sleeve_alt.json").read_text(encoding="utf-8") == alt_before
+
+    class _Quiet:
+        def forget_rules(self) -> None:
+            return None
+
+    cfg = Config(
+        symbols=("BTCUSDT",),
+        paper_cash_micro=3_000_000,
+        interval_sec=60,
+        max_positions=1,
+        alloc_bps=10_000,
+        min_notional_micro=1,
+        rsi_buy=35,
+        stop_bps=350,
+        take_bps=700,
+        trail_arm_bps=300,
+        trail_gap_bps=200,
+        live=False,
+        mode="rsi",
+        taker_bps=5,
+        daily_loss_bps=500,
+        stop_cooldown_sec=0,
+        symbol_lock=True,
+        api_key="",
+        api_secret="",
+    )
+    run_sleeves(cfg, _Quiet(), tmp_path)
+    assert not (paper / "sleeve_major.json").exists()
+    assert load_book(paper / "sleeve_alt.json", 0).cash_micro == 1_000_000
+    assert load_book(paper / "sleeve_meme.json", 0).cash_micro == 1_000_000
 
 
 def test_rate_limit_stops_the_cycle_and_keeps_the_book(tmp_path) -> None:
@@ -4939,7 +5571,7 @@ def test_ops_snapshot_drops_secrets(tmp_path) -> None:
     text = json.dumps(view)
     assert "do-not-show" not in text
     assert "hidden" not in text
-    assert view["books"]["sleeve_major"]["cash_micro"] == 33_333_334
+    assert view["books"]["sleeve_major"]["cash_micro"] == "33.333334"
     assert view["events"][-1]["symbol"] == "BTCUSDT"
     assert view["quotes"]["BTCUSDT"]["lag_bps"] == -1
     assert view["log"] == ["cycle ok"]
@@ -4948,7 +5580,16 @@ def test_ops_snapshot_drops_secrets(tmp_path) -> None:
     (tmp_path / "ops_events.jsonl").write_text("not-json\n", encoding="utf-8")
     broken = snapshot(tmp_path, 19280)
     assert broken["books"]["paper/book"] == {"error": "book is not json"}
-    assert broken["books"]["sleeve_major"]["cash_micro"] == 33_333_334
+    assert broken["books"]["sleeve_major"]["cash_micro"] == "33.333334"
+    wide = tmp_path / "sleeve_alt.json"
+    wide.write_text(
+        json.dumps({"cash_micro": 10**20, "realized_micro": True, "positions": ["x"] * 9}),
+        encoding="utf-8",
+    )
+    shown = snapshot(tmp_path, 19280)["books"]["sleeve_alt"]
+    assert shown["cash_micro"] == "100000000000000.000000"
+    assert shown["realized_micro"] == "unreadable"
+    assert shown["positions"] == "unreadable"
     assert "unreadable" == _shown_price()
 
 
@@ -4961,6 +5602,22 @@ def _shown_price() -> str:
             "positions": [{"symbol": "BTCUSDT", "entry_micro": 1.5, "peak_micro": 1}],
         }
     )
+    held = _show_book(
+        {
+            "price_scale": 1_000_000_000_000,
+            "positions": [
+                {
+                    "symbol": "BTCUSDT",
+                    "entry_micro": 100_000_000_000_000,
+                    "peak_micro": 100_000_000_000_000,
+                    "quote_micro": 10_000_000,
+                    "hold_flat": True,
+                }
+            ],
+        }
+    )
+    assert held["positions"][0]["hold_flat"] is True
+    assert held["positions"][0]["quote_micro"] == "10.000000"
     return str(view["positions"][0]["entry_micro"])
 
 
@@ -6345,7 +7002,7 @@ def test_hold_and_median_and_next_bar() -> None:
     assert median_micro([]) is None
 
 
-def test_drawdown_pair_lock_and_spread(tmp_path) -> None:
+def test_drawdown_pair_lock_and_spread(tmp_path, caplog) -> None:
     from spotbot.config import Config
     from spotbot.engine import _try_buy, run_cycle
     from spotbot.guards import drawdown_blocks, note_pair_stop, pair_locked, spread_blocks, top_spread_bps
@@ -6413,7 +7070,11 @@ def test_drawdown_pair_lock_and_spread(tmp_path) -> None:
 
     path = tmp_path / "peak.json"
     save_book(path, Book(cash_micro=800_000_000, positions=[], realized_micro=0, equity_peak_micro=1_000_000_000))
-    run_cycle(cfg, _Quiet(), path)
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="spotbot.engine"):
+        run_cycle(cfg, _Quiet(), path)
     saved = path.read_text(encoding="utf-8")
     assert "800000000" in saved
+    assert "sign does not hold across windows" in caplog.text
 

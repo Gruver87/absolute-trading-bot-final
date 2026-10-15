@@ -202,6 +202,25 @@ class MexcClient:
         span = _interval_ms(interval)
         return _parsed_klines(symbol, self._kline_raw(symbol, interval, limit, span), span, 2)
 
+    def ohlcv_stamped_until(
+        self, symbol: str, interval: str, limit: int, end_ms: int
+    ) -> list[tuple[int, int, int, int, int, int]]:
+        """Closed candles whose close is at or before end_ms. The latest window is not this tape."""
+        symbol = _text_symbol(symbol)
+        if not isinstance(interval, str) or not interval:
+            raise MexcError("kline interval is not text")
+        _public_limit(limit, "kline")
+        if limit > 1_000:
+            raise MexcError("kline limit is too large")
+        if isinstance(end_ms, bool) or not isinstance(end_ms, int) or end_ms <= 0 or end_ms >= 10**15:
+            raise MexcError(f"kline time for {symbol} is not a timestamp")
+        span = _interval_ms(interval)
+        rows = _parsed_klines(symbol, self._kline_raw_until(symbol, interval, limit, span, end_ms), span, 2)
+        closed = [row for row in rows if row[0] + span <= end_ms]
+        if len(closed) < 2:
+            raise MexcError(f"kline history for {symbol} is short")
+        return closed[-limit:]
+
     def klines_between(self, symbol: str, interval: str, start_ms: int, end_ms: int) -> list[tuple[int, int]]:
         """Close of each candle in [start, end), with its open time. Pages of 500."""
         symbol = _text_symbol(symbol)
@@ -275,6 +294,48 @@ class MexcClient:
         left = limit - len(recent)
         if left < 1:
             return recent
+        start = boundary - left * span
+        if start <= 0:
+            raise MexcError(f"kline history for {symbol} is short")
+        time.sleep(0.2)
+        earlier = self._public(
+            "/api/v3/klines",
+            {
+                "symbol": symbol,
+                "interval": interval,
+                "limit": str(left),
+                "startTime": str(start),
+                "endTime": str(boundary),
+            },
+        )
+        return _join_klines(earlier, recent, symbol)
+
+    def _kline_raw_until(self, symbol: str, interval: str, limit: int, span: int, end_ms: int) -> list:
+        page = 500 if limit > 500 else limit
+        window_start = end_ms - page * span
+        if window_start <= 0:
+            raise MexcError(f"kline history for {symbol} is short")
+        recent = self._public(
+            "/api/v3/klines",
+            {
+                "symbol": symbol,
+                "interval": interval,
+                "limit": str(page),
+                "startTime": str(window_start),
+                "endTime": str(end_ms - 1),
+            },
+        )
+        if not isinstance(recent, list) or not recent:
+            raise MexcError(f"kline history for {symbol} is short")
+        recent = [row for row in recent if _row_closed(row, span, end_ms)]
+        if not recent:
+            raise MexcError(f"kline history for {symbol} is short")
+        if limit <= len(recent):
+            return recent[-limit:]
+        boundary = recent[0][0]
+        if isinstance(boundary, bool) or not isinstance(boundary, int) or boundary <= 0:
+            raise MexcError(f"kline time for {symbol} is not a timestamp")
+        left = limit - len(recent)
         start = boundary - left * span
         if start <= 0:
             raise MexcError(f"kline history for {symbol} is short")
@@ -870,6 +931,16 @@ def _public_limit(limit: int, label: str) -> None:
         raise MexcError(f"{label} limit is not an integer")
     if limit > 5_000:
         raise MexcError(f"{label} limit is too large")
+
+
+def _row_closed(row: object, span: int, end_ms: int) -> bool:
+    """True when the candle's open is a timestamp and the bar has closed by end_ms."""
+    if not isinstance(row, list) or not row:
+        return False
+    opened = row[0]
+    if isinstance(opened, bool) or not isinstance(opened, int) or opened <= 0:
+        return False
+    return opened + span <= end_ms
 
 
 def _join_klines(earlier: object, recent: object, symbol: str) -> list:

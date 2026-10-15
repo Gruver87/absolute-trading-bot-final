@@ -132,6 +132,55 @@ def below_lower_band(prices: list[int], period: int = 20) -> bool:
     return prices[-1] <= band
 
 
+def rise_pays(closes: list[int], fill: int, slip_bps: int, taker_bps: int) -> bool:
+    """True when the close is already a round trip above the close 20 bars earlier and the next open still is.
+
+    The round trip is both slips and both taker fees. The 20 bars are the band window.
+    This replaces the reclaim. It does not tighten it.
+    """
+    if not isinstance(closes, list) or len(closes) < 21:
+        return False
+    older = closes[-21]
+    last = closes[-1]
+    if not _whole(older) or not _whole(last) or older <= 0 or last <= 0 or older >= 10**24 or last >= 10**24:
+        return False
+    bounds = (fill, slip_bps, taker_bps)
+    if any(isinstance(item, bool) or not isinstance(item, int) for item in bounds):
+        return False
+    if fill <= 0 or fill >= 10**24 or slip_bps < 0 or slip_bps > 10_000 or taker_bps < 0 or taker_bps > 10_000:
+        return False
+    round_bps = slip_bps * 2 + taker_bps * 2
+    if round_bps > 10_000:
+        return False
+    need = older * (10_000 + round_bps) // 10_000
+    paid = fill * (10_000 + slip_bps) // 10_000
+    if need <= older or paid <= 0 or paid >= 10**24 or need >= 10**24:
+        return False
+    return last > need and paid > need
+
+
+def mean_pays(closes: list[int], fill: int, slip_bps: int, taker_bps: int) -> bool:
+    """True when a sale back at the 20-bar mean still clears both slips and both taker fees.
+
+    The mean is the signal window already required by the reclaim. It is not a new target.
+    """
+    if not isinstance(closes, list) or len(closes) < 20:
+        return False
+    if any(not _whole(price) or price <= 0 or price >= 10**24 for price in closes[-20:]):
+        return False
+    bounds = (fill, slip_bps, taker_bps)
+    if any(isinstance(item, bool) or not isinstance(item, int) for item in bounds):
+        return False
+    if fill <= 0 or fill >= 10**24 or slip_bps < 0 or slip_bps > 10_000 or taker_bps < 0 or taker_bps > 10_000:
+        return False
+    mean = sum(closes[-20:]) // 20
+    paid = fill * (10_000 + slip_bps) // 10_000
+    sold = mean * (10_000 - slip_bps) // 10_000
+    if paid <= 0 or sold <= 0 or paid >= 10**24 or sold >= 10**24:
+        return False
+    return (sold - paid) * 10_000 > paid * taker_bps + sold * taker_bps
+
+
 def reclaim_still(closes: list[int], ask: int) -> bool:
     """The live ask is still the reclaim, not a fall back through the band."""
     if not isinstance(closes, list) or len(closes) < 21:

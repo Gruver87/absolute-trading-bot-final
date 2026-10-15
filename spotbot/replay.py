@@ -9,12 +9,12 @@ from dataclasses import dataclass
 
 from spotbot.exits import exit_reason
 from spotbot.fees import paper_sell
-from spotbot.liquidity import candle_lift
 from spotbot.money import notional_micro
 from spotbot.rules import budget_micro, plan_paper_buy
 from spotbot.sanity import follows_close, mark_ok, price_ok, slip_price
 from spotbot.mexc import KLINE_LIMIT
-from spotbot.signals import entry_signal, reclaim_still
+from spotbot.liquidity import candle_lift, range_pays
+from spotbot.signals import entry_signal, mean_pays, reclaim_still, rise_pays
 
 
 @dataclass(frozen=True)
@@ -70,6 +70,8 @@ def replay_closes(
     lock_count: int = 3,
     minute_closes: list[tuple[int, int]] | None = None,
     bar_open_ms: list[int] | None = None,
+    require_mean: bool = False,
+    require_rise: bool = False,
 ) -> ReplayResult:
     if (
         not closes
@@ -130,14 +132,21 @@ def replay_closes(
                 i += 1
                 continue
             window = _signal_closes(closes, i)
-            if entry_signal("REPLAY", window, rsi_buy) is None:
+            fill = _fill_price(opens, closes, i)
+            if require_rise:
+                if not rise_pays(window, fill or 0, slip_bps, taker_bps):
+                    i += 1
+                    continue
+            elif entry_signal("REPLAY", window, rsi_buy) is None:
                 i += 1
                 continue
-            fill = _fill_price(opens, closes, i)
-            if fill is not None and fill > 0 and not reclaim_still(window, fill):
+            elif fill is not None and fill > 0 and not reclaim_still(window, fill):
                 i += 1
                 continue
             if fill is not None and fill > 0 and not follows_close(closes[i], fill):
+                i += 1
+                continue
+            if require_mean and not mean_pays(window, fill or 0, slip_bps, taker_bps):
                 i += 1
                 continue
             paid = slip_price(fill or 0, slip_bps, True)
@@ -213,6 +222,7 @@ def replay_lift_bars(
     lock_count: int = 3,
     minute_closes: list[tuple[int, int]] | None = None,
     bar_open_ms: list[int] | None = None,
+    require_range: bool = False,
 ) -> ReplayResult:
     """Candle half of the liquidity rule. Bid/ask and the oracle are not in the tape.
 
@@ -283,6 +293,9 @@ def replay_lift_bars(
                 continue
             fill = _fill_price(opens, [bar[2] for bar in bars], i)
             if fill is not None and fill > 0 and not follows_close(bars[i][2], fill):
+                i += 1
+                continue
+            if require_range and not range_pays(high, low, fill or 0, slip_bps, taker_bps):
                 i += 1
                 continue
             paid = slip_price(fill or 0, slip_bps, True)

@@ -40,6 +40,7 @@ class Position:
     client_order_id: str = ""
     exchange_order_id: str = ""
     hold_flat: bool = False
+    below_lot: bool = False
 
     def to_json(self) -> dict[str, object]:
         return asdict(self)
@@ -63,6 +64,7 @@ class Position:
             client_order_id=_text(raw.get("client_order_id"), "client_order_id"),
             exchange_order_id=_text(raw.get("exchange_order_id"), "exchange_order_id"),
             hold_flat=_flag(raw.get("hold_flat", False), "gap hold"),
+            below_lot=_flag(raw.get("below_lot", False), "below lot"),
         )
 
 
@@ -466,6 +468,8 @@ def audit_book(book: Book) -> None:
             raise LedgerError("position reason is not text" if not isinstance(pos.reason, str) else "position reason is too long")
         if not isinstance(pos.hold_flat, bool):
             raise LedgerError("gap hold is not a flag")
+        if not isinstance(pos.below_lot, bool):
+            raise LedgerError("below lot is not a flag")
         if book.pending_side == "SELL" and book.pending_client_id and pos.client_order_id == book.pending_client_id:
             raise LedgerError("sell client id is already on a position")
         if (

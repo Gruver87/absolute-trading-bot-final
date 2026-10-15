@@ -46,6 +46,29 @@ def close_position_bps(high: int, low: int, close: int) -> int | None:
     return (close - low) * 10_000 // span
 
 
+def range_pays(high: int, low: int, fill: int, slip_bps: int, taker_bps: int) -> bool:
+    """True when one more bar of this same range still clears both slips and both taker fees.
+
+    The range is the signal bar. The width is the known round trip, not a scanned cutoff.
+    """
+    bounds = (high, low, fill, slip_bps, taker_bps)
+    if any(isinstance(item, bool) or not isinstance(item, int) for item in bounds):
+        return False
+    if high <= low or high >= 10**24 or low <= 0 or fill <= 0 or fill >= 10**24:
+        return False
+    if slip_bps < 0 or slip_bps > 10_000 or taker_bps < 0 or taker_bps > 10_000:
+        return False
+    span = high - low
+    paid = fill * (10_000 + slip_bps) // 10_000
+    sold = paid + span
+    if paid <= 0 or sold <= paid or sold >= 10**24:
+        return False
+    sold = sold * (10_000 - slip_bps) // 10_000
+    if sold <= 0 or sold >= 10**24:
+        return False
+    return (sold - paid) * 10_000 > paid * taker_bps + sold * taker_bps
+
+
 def candle_lift(
     symbol: str,
     quote_volumes: list[int],
