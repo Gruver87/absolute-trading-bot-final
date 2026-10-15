@@ -3428,6 +3428,87 @@ def test_a_bar_narrower_than_the_round_trip_is_not_a_lift() -> None:
     assert range_pays(fill + fill // 5, fill, fill, 30, True) is False
 
 
+def test_a_prior_bar_must_clear_the_round_trip() -> None:
+    from spotbot.liquidity import prior_bar_pays
+
+    low = 1_000_000_000_000
+    assert prior_bar_pays(low * 10_010 // 10_000, low, 30, 5) is False
+    assert prior_bar_pays(low * 10_200 // 10_000, low, 30, 5) is True
+    assert prior_bar_pays(low * 10_200 // 10_000, low, 30, True) is False
+    assert prior_bar_pays(low, low, 30, 5) is False
+
+
+def test_a_narrow_prior_bar_buys_nothing() -> None:
+    from spotbot.replay import replay_closes
+
+    closes = [100_000_000] * 40 + [90_000_000, 98_000_000, 80_000_000]
+    opens = [100_000_000] * 40 + [90_000_000, 98_000_000, 97_000_000]
+    wide = [price * 10_200 // 10_000 for price in closes]
+    common = dict(
+        cash_micro=1_000_000_000,
+        alloc_bps=10_000,
+        taker_bps=5,
+        rsi_buy=35,
+        stop_bps=350,
+        take_bps=700,
+        trail_arm_bps=10_000,
+        trail_gap_bps=10_000,
+        min_notional_micro=1,
+        opens=opens,
+        slip_bps=30,
+    )
+    blocked = replay_closes(closes, require_prior=True, highs=list(closes), lows=list(closes), **common)
+    allowed = replay_closes(closes, require_prior=True, highs=wide, lows=list(closes), **common)
+    missing = replay_closes(closes, require_prior=True, **common)
+    assert blocked.trades == 0
+    assert allowed.trades == 1
+    assert missing.open_known is False
+    assert missing.ended_open is True
+
+
+def test_a_missing_prior_bar_is_not_replaced_by_an_older_one() -> None:
+    from spotbot.replay import replay_lift_bars
+
+    flat = (100_000_000, 100_000_000, 100_000_000, 100)
+    wide = (120_000_000, 100_000_000, 110_000_000, 100)
+    lift = (110_000_000, 100_000_000, 108_000_000, 400)
+    hole = (100_000_000, 100_000_000, 0, 100)
+    after = [(100_000_000, 90_000_000, 100_000_000, 100)] * 3
+    common = dict(cash_micro=1_000_000_000, alloc_bps=10_000, taker_bps=5, min_notional_micro=1, require_prior=True)
+    touched = replay_lift_bars([flat] * 13 + [wide, lift] + after, **common)
+    gapped = replay_lift_bars([flat] * 13 + [wide, hole, lift] + after, **common)
+    assert touched.fees_micro > 0
+    assert gapped.fees_micro == 0
+    assert gapped.trades == 0
+
+
+def test_a_prior_bar_ten_minutes_away_is_not_the_last_bar() -> None:
+    from spotbot.replay import replay_lift_bars
+
+    flat = (100_000_000, 100_000_000, 100_000_000, 100)
+    wide = (120_000_000, 100_000_000, 110_000_000, 100)
+    lift = (110_000_000, 100_000_000, 108_000_000, 400)
+    after = [(100_000_000, 90_000_000, 100_000_000, 100)] * 3
+    bars = [flat] * 13 + [wide, lift] + after
+    start = 1_700_000_000_000
+    step = 300_000
+    adjacent = [start + index * step for index in range(len(bars))]
+    skipped = adjacent[:14] + [adjacent[14] + step] + [stamp + step for stamp in adjacent[15:]]
+    minutes = [(stamp + 60_000, 100_000_000) for stamp in adjacent]
+    late = [(stamp + 60_000, 100_000_000) for stamp in skipped]
+    common = dict(
+        cash_micro=1_000_000_000,
+        alloc_bps=10_000,
+        taker_bps=5,
+        min_notional_micro=1,
+        require_prior=True,
+    )
+    touched = replay_lift_bars(bars, bar_open_ms=adjacent, minute_closes=minutes, **common)
+    gapped = replay_lift_bars(bars, bar_open_ms=skipped, minute_closes=late, **common)
+    assert touched.fees_micro > 0
+    assert gapped.fees_micro == 0
+
+
 def test_a_rise_smaller_than_the_round_trip_is_not_a_buy() -> None:
     from spotbot.signals import rise_pays
 

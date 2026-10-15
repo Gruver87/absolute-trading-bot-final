@@ -69,6 +69,23 @@ def range_pays(high: int, low: int, fill: int, slip_bps: int, taker_bps: int) ->
     return (sold - paid) * 10_000 > paid * taker_bps + sold * taker_bps
 
 
+def prior_bar_pays(high: int, low: int, slip_bps: int, taker_bps: int) -> bool:
+    """True when the already closed prior bar's high and low clear both slips and both taker fees.
+
+    The bar is the one before the signal. It is not a forecast of the next bar.
+    """
+    bounds = (high, low, slip_bps, taker_bps)
+    if any(isinstance(item, bool) or not isinstance(item, int) for item in bounds):
+        return False
+    if high <= low or high >= 10**24 or low <= 0 or slip_bps < 0 or slip_bps > 10_000 or taker_bps < 0 or taker_bps > 10_000:
+        return False
+    paid = low * (10_000 + slip_bps) // 10_000
+    sold = high * (10_000 - slip_bps) // 10_000
+    if paid <= 0 or sold <= paid or paid >= 10**24 or sold >= 10**24:
+        return False
+    return (sold - paid) * 10_000 > paid * taker_bps + sold * taker_bps
+
+
 def candle_lift(
     symbol: str,
     quote_volumes: list[int],

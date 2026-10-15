@@ -30,6 +30,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--mean-pays", action="store_true", help="buy a reclaim only when the 20-bar mean clears the round trip")
     parser.add_argument("--range-pays", action="store_true", help="buy a lift only when that bar's range clears the round trip")
     parser.add_argument("--rise-pays", action="store_true", help="buy a rise that already cleared the round trip, instead of a reclaim")
+    parser.add_argument("--prior-pays", action="store_true", help="buy only when the already closed prior bar clears the round trip")
     args = parser.parse_args(argv)
     if args.limit < 80 or args.limit > 1000:
         print("limit must be 80..1000", file=sys.stderr)
@@ -40,8 +41,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.rise_pays and args.mean_pays:
         print("rise-pays and mean-pays are different entries", file=sys.stderr)
         return 2
+    if args.prior_pays and (args.rise_pays or args.mean_pays or args.range_pays):
+        print("prior-pays is its own entry filter", file=sys.stderr)
+        return 2
     if args.rise_pays:
         print("entry=rise: the reclaim is not used")
+    if args.prior_pays:
+        print("entry=prior: the last closed bar must clear the round trip")
     symbols = list(sleeve_symbols()) if args.sleeves else [args.symbol.upper()]
     later_rsi: list[tuple[str, int]] = []
     later_lift: list[tuple[str, int]] = []
@@ -123,6 +129,7 @@ def main(argv: list[str] | None = None) -> int:
                 require_mean=args.mean_pays,
                 require_range=args.range_pays,
                 require_rise=args.rise_pays,
+                require_prior=args.prior_pays,
             )
             rsi_net, lift_net = _run_pair(
                 "later",
@@ -140,6 +147,7 @@ def main(argv: list[str] | None = None) -> int:
                 require_mean=args.mean_pays,
                 require_range=args.range_pays,
                 require_rise=args.rise_pays,
+                require_prior=args.prior_pays,
             )
             if e_rsi is not None:
                 earlier_rsi.append((symbol, e_rsi))
@@ -165,6 +173,7 @@ def main(argv: list[str] | None = None) -> int:
                 require_mean=args.mean_pays,
                 require_range=args.range_pays,
                 require_rise=args.rise_pays,
+                require_prior=args.prior_pays,
             )
     if args.sleeves:
         _print_median("earlier rsi", [net for _symbol, net in earlier_rsi])
@@ -207,6 +216,7 @@ def _run_pair(
     require_mean: bool = False,
     require_range: bool = False,
     require_rise: bool = False,
+    require_prior: bool = False,
 ) -> tuple[int | None, int | None]:
     cash = parse_micro("1000")
     floor = parse_micro("3")
@@ -237,6 +247,9 @@ def _run_pair(
         bar_open_ms=bar_open_ms,
         require_mean=require_mean,
         require_rise=require_rise,
+        require_prior=require_prior,
+        highs=[bar[0] for bar in bars],
+        lows=[bar[1] for bar in bars],
         )
         _print_result(f"rsi:{label}", symbol, len(traded), result, taker_bps)
         _print_hold(label, symbol, traded, result, taker_bps, base_step_atoms, floor)
@@ -265,6 +278,7 @@ def _run_pair(
         minute_closes=minute_closes,
         bar_open_ms=bar_open_ms,
         require_range=require_range,
+        require_prior=require_prior,
         )
         _print_result(f"lift-candles:{label}", symbol, len(traded_bars), lift, taker_bps)
         if median:

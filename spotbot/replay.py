@@ -13,7 +13,7 @@ from spotbot.money import notional_micro
 from spotbot.rules import budget_micro, plan_paper_buy
 from spotbot.sanity import follows_close, mark_ok, price_ok, slip_price
 from spotbot.mexc import KLINE_LIMIT
-from spotbot.liquidity import candle_lift, range_pays
+from spotbot.liquidity import candle_lift, prior_bar_pays, range_pays
 from spotbot.signals import entry_signal, mean_pays, reclaim_still, rise_pays
 
 
@@ -72,6 +72,9 @@ def replay_closes(
     bar_open_ms: list[int] | None = None,
     require_mean: bool = False,
     require_rise: bool = False,
+    require_prior: bool = False,
+    highs: list[int] | None = None,
+    lows: list[int] | None = None,
 ) -> ReplayResult:
     if (
         not closes
@@ -91,17 +94,26 @@ def replay_closes(
         or (bar_open_ms is not None and (not isinstance(bar_open_ms, list) or len(bar_open_ms) != len(closes)))
     ):
         return ReplayResult(0, 0, 0, 0, False, ())
+    if require_prior and (highs is None or lows is None or len(highs) != len(closes) or len(lows) != len(closes)):
+        return ReplayResult(0, 0, 0, 0, True, (), open_known=False)
     clean: list[int] = []
     clean_opens: list[int] | None = [] if opens is not None else None
+    clean_highs: list[int] = []
+    clean_lows: list[int] = []
     clean_times: list[int] = []
+    kept_at: list[int] = []
     for index, price in enumerate(closes):
         if not _usable(price):
             continue
         if opens is not None and not _usable(opens[index]):
             continue
         clean.append(price)
+        kept_at.append(index)
         if clean_opens is not None and opens is not None:
             clean_opens.append(opens[index])
+        if require_prior and highs is not None and lows is not None:
+            clean_highs.append(highs[index])
+            clean_lows.append(lows[index])
         if bar_open_ms is not None:
             clean_times.append(bar_open_ms[index])
     if not clean:
@@ -147,6 +159,14 @@ def replay_closes(
                 i += 1
                 continue
             if require_mean and not mean_pays(window, fill or 0, slip_bps, taker_bps):
+                i += 1
+                continue
+            if require_prior and (
+                i < 1
+                or kept_at[i] != kept_at[i - 1] + 1
+                or (clean_times and clean_times[i] - clean_times[i - 1] != 300_000)
+                or not prior_bar_pays(clean_highs[i - 1], clean_lows[i - 1], slip_bps, taker_bps)
+            ):
                 i += 1
                 continue
             paid = slip_price(fill or 0, slip_bps, True)
@@ -223,6 +243,7 @@ def replay_lift_bars(
     minute_closes: list[tuple[int, int]] | None = None,
     bar_open_ms: list[int] | None = None,
     require_range: bool = False,
+    require_prior: bool = False,
 ) -> ReplayResult:
     """Candle half of the liquidity rule. Bid/ask and the oracle are not in the tape.
 
@@ -249,12 +270,14 @@ def replay_lift_bars(
     clean: list[tuple[int, int, int, int]] = []
     clean_opens: list[int] | None = [] if opens is not None else None
     clean_times: list[int] = []
+    kept_at: list[int] = []
     for index, bar in enumerate(bars):
         if bar[2] <= 0:
             continue
         if opens is not None and not _usable(opens[index]):
             continue
         clean.append(bar)
+        kept_at.append(index)
         if clean_opens is not None and opens is not None:
             clean_opens.append(opens[index])
         if bar_open_ms is not None:
@@ -296,6 +319,14 @@ def replay_lift_bars(
                 i += 1
                 continue
             if require_range and not range_pays(high, low, fill or 0, slip_bps, taker_bps):
+                i += 1
+                continue
+            if require_prior and (
+                i < 1
+                or kept_at[i] != kept_at[i - 1] + 1
+                or (clean_times and clean_times[i] - clean_times[i - 1] != 300_000)
+                or not prior_bar_pays(bars[i - 1][0], bars[i - 1][1], slip_bps, taker_bps)
+            ):
                 i += 1
                 continue
             paid = slip_price(fill or 0, slip_bps, True)
