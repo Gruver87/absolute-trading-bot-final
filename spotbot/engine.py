@@ -126,7 +126,7 @@ def run_cycle(
             if unmarked:
                 LOG.warning("daily loss halt book=%s no mark for %s", name, ",".join(unmarked))
             elif unpriced:
-                LOG.warning("entry halt book=%s equity is not priced after the sell fee", name)
+                LOG.warning("entry halt book=%s %s", name, _unpriced_why(book))
             elif drawn:
                 shown_peak = book.equity_peak_micro
                 if isinstance(shown_peak, bool) or not isinstance(shown_peak, int) or shown_peak < 0 or shown_peak >= 10**24:
@@ -340,15 +340,24 @@ def _close_positions(
     closed = 0
     marks: dict[str, int] = {}
     unmarked: list[str] = []
+    priced = True
+    read_book = False
     if not isinstance(book.positions, list) or len(book.positions) > 8:
         return 0, {}, ("unknown",)
     for pos in list(book.positions):
         step = _lot_step(client, pos.symbol)
-        dust = step is not None and not uses_slot(pos.base_atoms, step)
-        if step is not None and not dust:
-            pos.below_lot = False
+        if step is None and not _note_lot(client, pos):
+            LOG.warning("lot unread, position kept: %s", pos.symbol)
+            pos.rules_ok = False
+            priced = False
+            kept.append(pos)
+            continue
+        dust = pos.below_lot if step is None else not uses_slot(pos.base_atoms, step)
         if dust:
             pos.below_lot = True
+        elif step is not None:
+            pos.below_lot = False
+        pos.rules_ok = True
         try:
             bid, _ask = client.book_top(pos.symbol)
         except MexcRateLimit:
@@ -365,16 +374,17 @@ def _close_positions(
             kept.append(pos)
             continue
         marks[pos.symbol] = price
+        read_book = True
         armed = pos.hold_flat or _unseen(book, _now_sec(), cfg.interval_sec)
         started_peak = pos.peak_micro
         if _gap_hold(cfg, client, book, pos, price):
             kept.append(pos)
             continue
-        if not dust and price > pos.peak_micro:
-            pos.peak_micro = price
         if dust:
             kept.append(pos)
             continue
+        if price > pos.peak_micro:
+            pos.peak_micro = price
         if cfg.live and book.pending_client_id:
             LOG.warning("pending %s blocks the sell of %s", book.pending_symbol, pos.symbol)
             kept.append(pos)
@@ -438,10 +448,13 @@ def _close_positions(
                 raise
             except MexcError as exc:
                 LOG.warning("rules %s, sell kept: %s", pos.symbol, _short(str(exc)))
+                pos.rules_ok = False
                 kept.append(pos)
                 continue
             sell_atoms = round_base_atoms(pos.base_atoms, rule.base_step_atoms)
             if sell_atoms <= 0 or sell_atoms > pos.base_atoms:
+                pos.below_lot = True
+                pos.peak_micro = started_peak
                 LOG.warning("sell kept, %s is below the lot", pos.symbol)
                 kept.append(pos)
                 continue
@@ -451,16 +464,22 @@ def _close_positions(
                 raise
             except MexcError as exc:
                 LOG.warning("balance read failed, sell kept: %s", _short(str(exc)))
+                pos.balance_ok = False
                 kept.append(pos)
                 continue
+            pos.balance_ok = True
             if not _base_matches(pos.symbol, rule.base_asset):
                 LOG.warning("sell kept, %s base asset does not match", pos.symbol)
+                pos.asset_ok = False
                 kept.append(pos)
                 continue
+            pos.asset_ok = True
             if not base_is_free(free_bases.get(rule.base_asset, 0), sell_atoms):
                 LOG.warning("sell kept, %s is not free", pos.symbol)
+                pos.free_ok = False
                 kept.append(pos)
                 continue
+            pos.free_ok = True
             fresh_reason, fresh_bid, bad_mark = _confirm_exit(client, pos, reason, stop, take, arm, gap)
             if bad_mark:
                 if armed:
@@ -561,7 +580,7 @@ def _close_positions(
             mark_stop_cooldown(book, reason, cfg.stop_cooldown_sec, pos.symbol, cfg.stop_lock_count, cfg.stop_lock_sec)
             save_book(path, book)
             closed += 1
-            _note_exit(data_dir, book_name, reason, pos.symbol, price, credit, fee, left)
+            _note_exit(data_dir, book_name, reason, pos.symbol, price, credit, fee, left, fill.base_atoms)
             continue
         try:
             rule = client.symbol_rule(pos.symbol)
@@ -571,14 +590,19 @@ def _close_positions(
             raise
         except MexcError as exc:
             LOG.warning("rules %s, paper sell kept: %s", pos.symbol, _short(str(exc)))
+            pos.rules_ok = False
             kept.append(pos)
             continue
         if not _base_matches(pos.symbol, rule.base_asset):
             LOG.warning("paper sell kept, %s base asset does not match", pos.symbol)
+            pos.asset_ok = False
             kept.append(pos)
             continue
+        pos.asset_ok = True
         sell_atoms = round_base_atoms(pos.base_atoms, step)
         if sell_atoms <= 0 or sell_atoms > pos.base_atoms:
+            pos.below_lot = True
+            pos.peak_micro = started_peak
             kept.append(pos)
             continue
         fresh_reason, fresh_bid, bad_mark = _confirm_exit(client, pos, reason, stop, take, arm, gap)
@@ -630,9 +654,9 @@ def _close_positions(
         mark_stop_cooldown(book, reason, cfg.stop_cooldown_sec, pos.symbol, cfg.stop_lock_count, cfg.stop_lock_sec)
         save_book(path, book)
         closed += 1
-        _note_exit(data_dir, book_name, reason, pos.symbol, price, credit, fee, left)
+        _note_exit(data_dir, book_name, reason, pos.symbol, price, credit, fee, left, sell_atoms)
     book.positions = kept
-    if not unmarked:
+    if not unmarked and priced and read_book:
         book.seen_at = _now_sec()
     return closed, marks, tuple(unmarked)
 
@@ -1046,6 +1070,8 @@ def _try_buy(
             symbol=symbol,
             reason=reason,
             price=_shown_price(book.positions[-1].entry_micro if book.positions else 0),
+            debit=_shown_usdt(fill.quote_micro + fee),
+            fee=_shown_usdt(fee),
         )
         return True
     checked = _recheck_ask(client, symbol, price, cfg.spread_bps, rule.price_tick, _risk(cfg)[0])
@@ -1092,6 +1118,8 @@ def _try_buy(
         symbol=symbol,
         reason=reason,
         price=_shown_price(ask),
+        debit=_shown_usdt(debit),
+        fee=_shown_usdt(fee),
     )
     return True
 
@@ -1154,7 +1182,7 @@ def _resolve_pending(client: MexcClient, book: Book, path: Path) -> str | None:
         over = _over_request(book, base_atoms, quote_micro)
         if over:
             return over
-        if not _apply_progress(client, book, order, base_atoms, quote_micro, price_micro):
+        if not _record_progress(client, book, path, order, base_atoms, quote_micro, price_micro):
             return "pending fill was not recorded"
         save_book(path, book)
         return _short(f"{book.pending_side} {book.pending_symbol} status {_status_text(order)}")
@@ -1189,7 +1217,7 @@ def _resolve_pending(client: MexcClient, book: Book, path: Path) -> str | None:
     over = _over_request(book, base_atoms, quote_micro)
     if over:
         return over
-    if not _apply_progress(client, book, order, base_atoms, quote_micro, price_micro):
+    if not _record_progress(client, book, path, order, base_atoms, quote_micro, price_micro):
         return "pending fill was not recorded"
     side = book.pending_side
     symbol = book.pending_symbol
@@ -1214,6 +1242,99 @@ def _over_request(book: Book, base_atoms: int, quote_micro: int) -> str | None:
     if book.pending_side == "SELL" and base_atoms > book.pending_base_atoms:
         return "pending sell filled more base than requested"
     return None
+
+
+def _record_progress(
+    client: MexcClient,
+    book: Book,
+    path: Path,
+    order: dict[str, object],
+    base_atoms: int,
+    quote_micro: int,
+    price_micro: int,
+) -> bool:
+    """Book a recovered fill. A cash change is written to the deals list."""
+    side = book.pending_side
+    symbol = book.pending_symbol
+    before = _holding(book, symbol)
+    if not _apply_progress(client, book, order, base_atoms, quote_micro, price_micro):
+        return False
+    _note_progress(path, book, side, symbol, price_micro, before)
+    return True
+
+
+def _holding(book: Book, symbol: str) -> tuple[int, int, int]:
+    """Cash, fees, and the coin size before a recovered fill is booked."""
+    base = 0
+    for pos in book.positions:
+        if pos.symbol == symbol and isinstance(pos.base_atoms, int) and not isinstance(pos.base_atoms, bool):
+            base += pos.base_atoms
+    return book.cash_micro, book.fees_micro, base
+
+
+def _note_progress(
+    path: Path,
+    book: Book,
+    side: str,
+    symbol: str,
+    price_micro: int,
+    before: tuple[int, int, int],
+) -> None:
+    """Write the part that just landed. A repeated read of the same fill writes nothing."""
+    cash0, fees0, base0 = before
+    _cash1, fees1, base1 = _holding(book, symbol)
+    if book.cash_micro == cash0 and fees1 == fees0 and base1 == base0:
+        return
+    if side == "SELL":
+        left = any(pos.symbol == symbol for pos in book.positions)
+        sold = base0 - base1
+        credit = book.cash_micro - cash0
+        fee = fees1 - fees0
+        price = price_micro
+        gross = credit + fee
+        if sold <= 0:
+            note_event(
+                ops_root(path),
+                book=path.stem,
+                kind="fee",
+                symbol=symbol,
+                reason="recovered",
+                price="-",
+                credit=_shown_usdt(credit),
+                fee=_shown_usdt(fee),
+                left=left,
+                size=_shown_change(sold),
+            )
+            return
+        if gross > 0:
+            try:
+                price = implied_price_micro(gross, sold)
+            except MoneyError:
+                price = price_micro
+        _note_exit(ops_root(path), path.stem, "recovered", symbol, price, credit, fee, left, sold)
+        return
+    if side == "BUY":
+        bought = base1 - base0
+        debit = cash0 - book.cash_micro
+        fee = fees1 - fees0
+        price = price_micro
+        quote = debit - fee
+        if bought > 0 and quote > 0:
+            try:
+                price = implied_price_micro(quote, bought)
+            except MoneyError:
+                price = price_micro
+        note_event(
+            ops_root(path),
+            book=path.stem,
+            kind="fee" if bought <= 0 else "entry",
+            symbol=symbol,
+            reason="recovered",
+            price="-" if bought <= 0 else _shown_price(price),
+            debit=_shown_usdt(debit),
+            fee=_shown_usdt(fee),
+            size=_shown_change(bought),
+        )
 
 
 def _apply_progress(
@@ -1362,12 +1483,32 @@ def _account_conflict(client: MexcClient, book: Book, sibling_paths: tuple[Path,
     return inventory_mismatch(positions, bases, elsewhere)
 
 
+def _unpriced_why(book: Book) -> str:
+    """Name why this book has no equity number. A missing fee is the last reason."""
+    rows = book.positions if isinstance(book.positions, list) else []
+    if any(getattr(pos, "rules_ok", True) is False for pos in rows):
+        return "pair rules were not read"
+    if any(getattr(pos, "asset_ok", True) is False for pos in rows):
+        return "base asset does not match"
+    if any(getattr(pos, "balance_ok", True) is False for pos in rows):
+        return "exchange balance was not read"
+    if any(getattr(pos, "free_ok", True) is False for pos in rows):
+        return "the coin is not free"
+    return "equity is not priced after the sell fee"
+
+
 def _exit_fees(client: MexcClient, book: Book) -> dict[str, int] | None:
-    """Taker rate for each open coin. None when a rate cannot be read."""
+    """Taker rate for each open coin. None when a rate cannot be read.
+
+    A coin below the lot, or one whose rules were not read, is not asked again.
+    The missing bid still refuses the equity number.
+    """
     if not isinstance(book.positions, list) or len(book.positions) > 8:
         return None
     fees: dict[str, int] = {}
     for pos in book.positions:
+        if getattr(pos, "below_lot", False) is True or getattr(pos, "rules_ok", True) is False:
+            continue
         try:
             rule = client.symbol_rule(pos.symbol)
         except MexcRateLimit:
@@ -1378,6 +1519,15 @@ def _exit_fees(client: MexcClient, book: Book) -> dict[str, int] | None:
             return None
         fees[pos.symbol] = rule.taker_bps
     return fees
+
+
+def _note_lot(client: MexcClient, pos: Position) -> bool:
+    """A second read of the lot. An unread step does not invent a sellable coin."""
+    step = _lot_step(client, pos.symbol)
+    if step is None:
+        return False
+    pos.below_lot = not uses_slot(pos.base_atoms, step)
+    return True
 
 
 def _lot_step(client: MexcClient, symbol: str) -> int | None:
@@ -1649,15 +1799,18 @@ def _note_exit(
     credit: int,
     fee: int,
     left: bool,
+    sold_atoms: int,
 ) -> None:
-    """The journal shows the cash that landed, and whether the coin is still on the book."""
+    """The journal shows the cash that landed, the coin size that left, and whether any remains."""
+    size = _shown_size(sold_atoms)
     LOG.info(
-        "exit %s %s price=%s credit=%s fee=%s%s",
+        "exit %s %s price=%s credit=%s fee=%s size=%s%s",
         reason,
         symbol,
         _shown_price(price),
         _shown_usdt(credit),
         _shown_usdt(fee),
+        size,
         " left" if left else "",
     )
     note_event(
@@ -1670,7 +1823,30 @@ def _note_exit(
         credit=_shown_usdt(credit),
         fee=_shown_usdt(fee),
         left=left,
+        size=size,
     )
+
+
+def _shown_change(atoms: int) -> str:
+    """Coin change for one recovered line. A decrease keeps its minus."""
+    if atoms == 0:
+        return "0"
+    if atoms < 0:
+        text = _shown_size(-atoms)
+        return text if text == "не читается" else f"-{text}"
+    return _shown_size(atoms)
+
+
+def _shown_size(atoms: object) -> str:
+    """Coin size for the journal. A raw atom count is not a size."""
+    from spotbot.money import BASE_ATOMS, MoneyError, format_fixed
+
+    if isinstance(atoms, bool) or not isinstance(atoms, int) or atoms < 0 or atoms >= 10**24:
+        return "не читается"
+    try:
+        return format_fixed(atoms, BASE_ATOMS)
+    except MoneyError:
+        return "не читается"
 
 
 def _shown_usdt(micro: object) -> str:

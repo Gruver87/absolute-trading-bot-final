@@ -496,8 +496,21 @@ def test_a_json_float_is_not_a_price() -> None:
     assert "удержание, ниже себестоимости не продаётся" in _PAGE
     assert "p.hold_flat === true" in _PAGE
     assert "меньше шага лота, продажа не уходит" in _PAGE
+    assert "правила пары не прочитаны" in _PAGE
+    assert "базовая монета не совпадает" in _PAGE
+    assert "на бирже монета не свободна" in _PAGE
+    assert "баланс биржи не прочитан" in _PAGE
+    assert "pending_client_id" in _PAGE
+    assert "заявка" in _PAGE
+    assert "book.pause" in _PAGE
+    assert "p.lock" in _PAGE
+    assert "book.locks" in _PAGE
+    assert "book.seen" in _PAGE
     assert "зачислено" in _PAGE
+    assert "ev.fee" in _PAGE
+    assert "ev.debit" in _PAGE
     assert "остаток на книге" in _PAGE
+    assert "ev.size" in _PAGE
 
 
 def test_exchange_filters_refuse_a_json_float() -> None:
@@ -769,7 +782,7 @@ def test_a_bool_is_not_a_peer_or_a_client_id(tmp_path) -> None:
         handle.seek(1_000_001)
         handle.write(b" ")
     view = snapshot(tmp_path, 19280)
-    assert view["books"]["paper/book"]["error"] == "book file is too large"
+    assert view["books"]["paper/book"]["error"] == "файл книги слишком большой"
 
 
 def test_a_bool_is_not_a_candle_or_a_config_number() -> None:
@@ -1595,7 +1608,7 @@ def test_a_long_digit_string_is_not_a_setting(monkeypatch, tmp_path) -> None:
     else:
         raise AssertionError("a numeric ledger must not be saved")
     shown = _show_book({"positions": [{"entry_micro": 10**25, "peak_micro": 1}], "price_scale": 1_000_000_000_000})
-    assert shown["positions"][0]["entry_micro"] == "unreadable"
+    assert shown["positions"][0]["entry_micro"] == "не читается"
     assert _public({1: "hidden-by-type"}) == {}
     (tmp_path / "ops_heartbeat.json").write_bytes(b"{" + b"0" * 1_000_001)
     assert _heartbeat(tmp_path) is None
@@ -2075,9 +2088,9 @@ def test_a_ceiling_price_is_not_a_log_crash(tmp_path) -> None:
     assert _shown_price(10**24) == "unreadable"
     assert _shown_price(1_000_000_000_000) == "1"
     view = _show_book({"positions": [{"symbol": "BTCUSDT", "entry_micro": 10**24, "peak_micro": 1}], "price_scale": 1_000_000_000_000})
-    assert view["positions"][0]["entry_micro"] == "unreadable"
+    assert view["positions"][0]["entry_micro"] == "не читается"
     wide = _show_book({"positions": [{}] * 9, "price_scale": 1_000_000_000_000})
-    assert wide["positions"] == "unreadable"
+    assert wide["positions"] == "не читается"
     (tmp_path / "ops_heartbeat.json").write_text('{"at": "%s", "book": "major"}' % ("x" * 41), encoding="utf-8")
     assert _heartbeat(tmp_path) is None
     quotes = {f"A{i}USDT": {"mexc": "1"} for i in range(33)}
@@ -2401,10 +2414,10 @@ def test_a_wide_row_is_not_a_candle_and_a_deep_page_is_not_unfolded() -> None:
     while isinstance(shown, list):
         shown = shown[0]
         steps += 1
-    assert shown == "unreadable"
+    assert shown == "не читается"
     assert steps <= 8
     assert _public({"k": "y" * 200})["k"] == "y" * 180
-    assert _public({str(i): 1 for i in range(65)}) == "unreadable"
+    assert _public({str(i): 1 for i in range(65)}) == "не читается"
 
 
 def test_a_huge_lot_step_does_not_open_the_pair(tmp_path) -> None:
@@ -2564,6 +2577,36 @@ def test_a_long_order_id_is_not_read(monkeypatch, tmp_path) -> None:
     assert len(shown) == 180
 
 
+def test_a_raw_quote_price_is_text(tmp_path) -> None:
+    import json
+
+    from spotbot.ops_http import _quotes
+
+    (tmp_path / "ops_quotes.json").write_text(
+        json.dumps(
+            {
+                "BTCUSDT": {
+                    "mexc": 100_000 * 1_000_000_000_000,
+                    "binance": "unreadable",
+                    "bybit": "-",
+                    "okx": 0,
+                    "lag_bps": 10**18,
+                    "width_bps": 12,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    shown = _quotes(tmp_path)["BTCUSDT"]
+    assert isinstance(shown, dict)
+    assert shown["mexc"] == "100000"
+    assert shown["binance"] == "не читается"
+    assert shown["bybit"] == "-"
+    assert shown["okx"] == "не читается"
+    assert shown["lag_bps"] == "не читается"
+    assert shown["width_bps"] == 12
+
+
 def test_a_full_disk_is_not_another_process() -> None:
     import errno
 
@@ -2637,8 +2680,8 @@ def test_a_huge_file_does_not_replace_the_book(tmp_path) -> None:
         raise AssertionError("more than 1000 candles must not be requested")
     assert clock_allows(1_000_000, 1_000_000, 10_001) is False
     assert clock_allows(1_000_000, 1_000_100) is True
-    assert _public(10**24) == "unreadable"
-    assert _public(1.5) == "unreadable"
+    assert _public(10**24) == "не читается"
+    assert _public(1.5) == "не читается"
     assert _public(True) is True
     assert _public(5) == 5
     assert _ema_last(None, 14) is None
@@ -3100,12 +3143,12 @@ def test_a_huge_log_does_not_start(tmp_path) -> None:
     assert _log_refused(small, 10) is True
     planted = tmp_path / "notdir"
     planted.write_text("x", encoding="utf-8")
-    assert snapshot(planted)["books"] == {"error": "data dir is not a directory"}
+    assert snapshot(planted)["books"] == {"error": "папка данных не читается"}
     try:
         _status_bytes(tmp_path, 19280, 10)
         raise AssertionError("status size")
     except OpsError as exc:
-        assert "unreadable" in str(exc)
+        assert "не читается" in str(exc)
 
 
 def test_a_long_day_is_not_a_guard(tmp_path) -> None:
@@ -3212,7 +3255,7 @@ def test_a_directory_is_not_a_book(tmp_path) -> None:
         "positions": [{"entry_micro": 1_000_000_000_000, "peak_micro": 1_000_000_000_000, **{str(i): 1 for i in range(15)}}],
     }
     shown = _show_book(wide)
-    assert shown["positions"] == ["unreadable"]
+    assert shown["positions"] == ["не читается"]
     assert _apply_progress(None, buy, "nope", 1, 1, 1) is False
 
 
@@ -5071,6 +5114,7 @@ def test_a_partial_sell_says_the_coin_remains(tmp_path) -> None:
     assert book.positions[0].quote_micro == 5_000_000
     text = (tmp_path / "ops_events.jsonl").read_text(encoding="utf-8")
     assert '"left": true' in text
+    assert '"size": "1"' in text
 
 
 def test_a_coin_below_the_lot_is_not_counted_as_cash() -> None:
@@ -5144,6 +5188,763 @@ def test_a_coin_below_the_lot_does_not_raise_the_peak(tmp_path) -> None:
     missed = Book(cash_micro=0, positions=[dark], realized_micro=0, seen_at=1)
     _close_positions(cfg, _Down(), missed, tmp_path / "dark.json", "book", True)
     assert dark.below_lot is True and dark.peak_micro == entry
+
+
+def test_a_late_lot_still_keeps_the_coin_out_of_cash(tmp_path) -> None:
+    from spotbot.config import Config
+    from spotbot.engine import _close_positions, _now_sec
+    from spotbot.guards import marked_equity
+    from spotbot.mexc import MexcError
+    from spotbot.rules import SymbolRule
+    from spotbot.state import Book, Position
+
+    entry = 100_000_000_000_000
+    bid = 90_000_000_000_000
+    calls = {"n": 0}
+
+    class _Late:
+        def symbol_rule(self, symbol: str) -> SymbolRule:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise MexcError("rules")
+            return SymbolRule(symbol, True, "", 5, 100_000_000, 1, 0, "BTC")
+
+        def book_top(self, _symbol: str) -> tuple[int, int]:
+            return bid, bid + 1
+
+    cfg = Config(
+        symbols=("BTCUSDT",),
+        paper_cash_micro=0,
+        interval_sec=60,
+        max_positions=1,
+        alloc_bps=10_000,
+        min_notional_micro=1,
+        rsi_buy=35,
+        stop_bps=350,
+        take_bps=700,
+        trail_arm_bps=300,
+        trail_gap_bps=200,
+        live=False,
+        mode="rsi",
+        taker_bps=5,
+        daily_loss_bps=500,
+        stop_cooldown_sec=0,
+        symbol_lock=True,
+        api_key="",
+        api_secret="",
+    )
+    held = Position("BTCUSDT", entry, entry, 5_000_000, 50_000_000, "test")
+    book = Book(cash_micro=7_000_000, positions=[held], realized_micro=0, seen_at=_now_sec())
+    closed, marks, unmarked = _close_positions(cfg, _Late(), book, tmp_path / "late.json", "book", True)
+    assert closed == 0 and unmarked == ()
+    assert held.below_lot is True and book.cash_micro == 7_000_000
+    assert marked_equity(book.cash_micro, book.positions, marks, {"BTCUSDT": 5}) == 7_000_000
+
+
+def test_an_unread_lot_is_checked_again_before_the_peak(tmp_path) -> None:
+    from spotbot.config import Config
+    from spotbot.engine import _close_positions, _now_sec
+    from spotbot.guards import marked_equity
+    from spotbot.mexc import MexcError
+    from spotbot.rules import SymbolRule
+    from spotbot.state import Book, Position
+    import spotbot.engine as engine
+    from spotbot.oracle import venue_quotes
+
+    entry = 100_000_000_000_000
+    bid = 101_000_000_000_000
+    calls = {"n": 0}
+
+    class _Late:
+        def symbol_rule(self, symbol: str) -> SymbolRule:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise MexcError("rules")
+            return SymbolRule(symbol, True, "", 5, 100_000_000, 1, 0, "BTC")
+
+        def book_top(self, _symbol: str) -> tuple[int, int]:
+            return bid, bid + 1
+
+    cfg = Config(
+        symbols=("BTCUSDT",),
+        paper_cash_micro=0,
+        interval_sec=60,
+        max_positions=1,
+        alloc_bps=10_000,
+        min_notional_micro=1,
+        rsi_buy=35,
+        stop_bps=350,
+        take_bps=700,
+        trail_arm_bps=300,
+        trail_gap_bps=200,
+        live=False,
+        mode="rsi",
+        taker_bps=5,
+        daily_loss_bps=500,
+        stop_cooldown_sec=0,
+        symbol_lock=True,
+        api_key="",
+        api_secret="",
+    )
+    held = Position("BTCUSDT", entry, entry, 5_000_000, 50_000_000, "test")
+    book = Book(cash_micro=4_000_000, positions=[held], realized_micro=0, seen_at=_now_sec())
+    engine.venue_quotes = lambda _symbol: {}  # type: ignore[method-assign]
+    try:
+        closed, marks, unmarked = _close_positions(cfg, _Late(), book, tmp_path / "wick.json", "book", True)
+    finally:
+        engine.venue_quotes = venue_quotes
+    assert closed == 0 and unmarked == ()
+    assert held.below_lot is True and held.peak_micro == entry
+    assert marked_equity(book.cash_micro, book.positions, marks, {"BTCUSDT": 5}) == 4_000_000
+
+
+def test_an_unread_lot_is_not_cash(tmp_path) -> None:
+    from spotbot.config import Config
+    from spotbot.engine import _close_positions
+    from spotbot.guards import marked_equity
+    from spotbot.mexc import MexcError
+    from spotbot.rules import SymbolRule
+    from spotbot.state import Book, Position
+
+    entry = 100_000_000_000_000
+
+    class _Blind:
+        def symbol_rule(self, _symbol: str) -> SymbolRule:
+            raise MexcError("rules")
+
+        def book_top(self, _symbol: str) -> tuple[int, int]:
+            raise AssertionError("an unread lot does not need a bid")
+
+    cfg = Config(
+        symbols=("BTCUSDT",),
+        paper_cash_micro=0,
+        interval_sec=60,
+        max_positions=1,
+        alloc_bps=10_000,
+        min_notional_micro=1,
+        rsi_buy=35,
+        stop_bps=350,
+        take_bps=700,
+        trail_arm_bps=300,
+        trail_gap_bps=200,
+        live=False,
+        mode="rsi",
+        taker_bps=5,
+        daily_loss_bps=500,
+        stop_cooldown_sec=0,
+        symbol_lock=True,
+        api_key="",
+        api_secret="",
+    )
+    held = Position("BTCUSDT", entry, entry, 5_000_000, 100_000_000, "test")
+    book = Book(cash_micro=4_000_000, positions=[held], realized_micro=0, seen_at=50)
+    closed, marks, unmarked = _close_positions(cfg, _Blind(), book, tmp_path / "blind.json", "book", True)
+    assert closed == 0 and unmarked == () and marks == {}
+    assert book.seen_at == 50
+    assert held.below_lot is False and held.rules_ok is False and held.peak_micro == entry
+    assert book.cash_micro == 4_000_000
+    from spotbot.ops_http import _show_book
+
+    shown = _show_book({"cash_micro": 1, "seen_at": 50, "pair_stops": {"BTCUSDT": [50]}, "positions": [], "price_scale": 1_000_000_000_000})
+    assert str(shown["seen"]).startswith("стакан ") and "ещё не" not in str(shown["seen"])
+    assert "seen_at" not in shown and "pair_stops" not in shown
+    fresh = _show_book({"cash_micro": 1, "seen_at": 0, "positions": [], "price_scale": 1_000_000_000_000})
+    assert fresh["seen"] == "стакан ещё не читался"
+    ahead = _show_book({"cash_micro": 1, "seen_at": 4_102_444_800, "positions": [], "price_scale": 1_000_000_000_000})
+    assert ahead["seen"] == "не читается"
+    assert marked_equity(book.cash_micro, book.positions, marks, {"BTCUSDT": 5}) is None
+
+
+def test_book_money_on_the_page_is_text() -> None:
+    from spotbot.ops_http import _show_book
+
+    shown = _show_book(
+        {
+            "cash_micro": 1,
+            "equity_peak_micro": 1_000_000_000,
+            "credited_main_micro": 1_000_000_000,
+            "guard_realized_micro": -5,
+            "pending_quote_micro": 2_000_000,
+            "pending_applied_fee": 5,
+            "pending_open_quote": 3_000_000,
+            "pending_ack_fee": None,
+            "positions": [],
+            "price_scale": 1_000_000_000_000,
+        }
+    )
+    assert isinstance(shown, dict)
+    assert shown["equity_peak_micro"] == "1000.000000"
+    assert shown["credited_main_micro"] == "1000.000000"
+    assert shown["guard_realized_micro"] == "-0.000005"
+    assert shown["pending_quote_micro"] == "2.000000"
+    assert shown["pending_applied_fee"] == "0.000005"
+    assert shown["pending_open_quote"] == "3.000000"
+    assert shown["pending_ack_fee"] is None
+
+
+def test_a_pending_coin_on_the_page_is_text() -> None:
+    from spotbot.ops_http import _show_book
+
+    shown = _show_book(
+        {
+            "cash_micro": 1,
+            "pending_base_atoms": 150_000_000,
+            "pending_applied_atoms": 0,
+            "pending_ack_base_fee": None,
+            "positions": [],
+            "price_scale": 1_000_000_000_000,
+        }
+    )
+    assert isinstance(shown, dict)
+    assert shown["pending_base_atoms"] == "1.5"
+    assert shown["pending_applied_atoms"] == "0"
+    assert shown["pending_ack_base_fee"] is None
+    bad = _show_book({"pending_base_atoms": True, "positions": [], "price_scale": 1_000_000_000_000})
+    assert isinstance(bad, dict) and bad["pending_base_atoms"] == "не читается"
+
+
+def test_a_stop_pause_is_shown_until_it_ends() -> None:
+    from spotbot.engine import _now_sec
+    from spotbot.ops_http import _pause_text, _show_book
+
+    assert _pause_text(0) == ""
+    assert _pause_text(None) == ""
+    assert _pause_text(True) == "не читается"
+    later = _now_sec() + 90
+    assert _pause_text(later).startswith("пауза после стопа ещё ")
+    assert _pause_text(_now_sec() - 5) == ""
+    shown = _show_book({"cooldown_until": later, "positions": [], "price_scale": 1_000_000_000_000})
+    assert isinstance(shown, dict) and str(shown["pause"]).startswith("пауза после стопа ещё ")
+    assert "cooldown_until" not in shown
+
+
+def test_order_ids_do_not_reach_the_page() -> None:
+    from spotbot.ops_http import _show_book
+
+    shown = _show_book(
+        {
+            "pending_client_id": "abc123",
+            "pending_exchange_order_id": "99",
+            "pending_side": "SELL",
+            "pending_symbol": "BTCUSDT",
+            "positions": [],
+            "price_scale": 1_000_000_000_000,
+        }
+    )
+    assert isinstance(shown, dict)
+    assert shown["pending_client_id"] is True
+    assert shown["pending_side"] == "SELL"
+    assert "pending_exchange_order_id" not in shown
+    assert "abc123" not in str(shown) and "99" not in str(shown)
+    quiet = _show_book({"pending_client_id": "", "positions": [], "price_scale": 1_000_000_000_000})
+    assert isinstance(quiet, dict) and quiet["pending_client_id"] is False
+    coin = _show_book(
+        {
+            "positions": [
+                {
+                    "symbol": "BTCUSDT",
+                    "entry_micro": 100_000_000_000_000,
+                    "peak_micro": 100_000_000_000_000,
+                    "quote_micro": 1_000_000,
+                    "base_atoms": 100_000_000,
+                    "client_order_id": "abc123",
+                    "exchange_order_id": "99",
+                }
+            ],
+            "price_scale": 1_000_000_000_000,
+        }
+    )
+    assert isinstance(coin, dict)
+    held = coin["positions"][0]
+    assert "client_order_id" not in held and "exchange_order_id" not in held
+    assert "abc123" not in str(coin)
+
+
+def test_an_old_event_integer_is_decimal_text(tmp_path) -> None:
+    import json
+
+    from spotbot.ops_http import _events
+
+    (tmp_path / "ops_events.jsonl").write_text(
+        json.dumps({"credit": 1_500_000, "fee": 5, "price": 100_000_000_000_000, "debit": "2.000000"})
+        + "\n"
+        + json.dumps({"size": 150_000_000, "price": "unreadable", "credit": "unreadable", "fee": True})
+        + "\n",
+        encoding="utf-8",
+    )
+    rows = _events(tmp_path)
+    assert rows[0]["credit"] == "1.500000"
+    assert rows[0]["fee"] == "0.000005"
+    assert rows[0]["debit"] == "2.000000"
+    assert isinstance(rows[0]["price"], str) and rows[0]["price"] != 100_000_000_000_000
+    assert rows[1]["size"] == "1.5"
+    assert rows[1]["price"] == "не читается"
+    assert rows[1]["credit"] == "не читается"
+    assert rows[1]["fee"] == "не читается"
+
+
+def test_a_pair_lock_is_shown_on_the_coin() -> None:
+    from spotbot.engine import _now_sec
+    from spotbot.ops_http import _show_book
+
+    later = _now_sec() + 120
+    shown = _show_book(
+        {
+            "positions": [
+                {
+                    "symbol": "BTCUSDT",
+                    "entry_micro": 100_000_000_000_000,
+                    "peak_micro": 100_000_000_000_000,
+                    "quote_micro": 1_000_000,
+                    "base_atoms": 100_000_000,
+                }
+            ],
+            "pair_lock_until": {"BTCUSDT": later, "ETHUSDT": _now_sec() - 5},
+            "price_scale": 1_000_000_000_000,
+        }
+    )
+    assert isinstance(shown, dict)
+    assert "pair_lock_until" not in shown
+    assert str(shown["positions"][0]["lock"]).startswith("пара закрыта ещё ")
+    assert shown["locks"] == ""
+    sold = _show_book(
+        {
+            "positions": [],
+            "pair_lock_until": {"BTCUSDT": later},
+            "price_scale": 1_000_000_000_000,
+        }
+    )
+    assert isinstance(sold, dict) and str(sold["locks"]).startswith("BTCUSDT пара закрыта ещё ")
+
+
+def test_a_wide_coin_does_not_hide_its_pair_lock() -> None:
+    from spotbot.engine import _now_sec
+    from spotbot.ops_http import _show_book
+
+    later = _now_sec() + 90
+    fat = {"symbol": "BTCUSDT", "entry_micro": 1, "peak_micro": 1}
+    fat.update({str(i): 1 for i in range(14)})
+    shown = _show_book(
+        {
+            "positions": [fat],
+            "pair_lock_until": {"BTCUSDT": later},
+            "price_scale": 1_000_000_000_000,
+        }
+    )
+    assert isinstance(shown, dict)
+    assert shown["positions"] == ["не читается"]
+    assert str(shown["locks"]).startswith("BTCUSDT пара закрыта ещё ")
+
+
+def test_a_missing_sleeve_is_named(tmp_path) -> None:
+    from spotbot.ops_http import snapshot
+
+    paper = tmp_path / "paper"
+    paper.mkdir()
+    (paper / "sleeve_major.json").write_text(
+        '{"cash_micro": 1, "positions": [], "price_scale": 1000000000000}',
+        encoding="utf-8",
+    )
+    books = snapshot(tmp_path)["books"]
+    assert isinstance(books, dict)
+    assert "error" not in books["paper/sleeve_major"]
+    assert books["paper/sleeve_alt"] == {"error": "книги нет"}
+    assert books["paper/sleeve_meme"] == {"error": "книги нет"}
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert snapshot(empty)["books"] == {}
+
+
+def test_a_rejected_book_is_not_shown_as_cash(tmp_path) -> None:
+    from spotbot.ops_http import snapshot
+
+    paper = tmp_path / "paper"
+    paper.mkdir()
+    (paper / "sleeve_major.json").write_text(
+        '{"cash_micro": -1, "positions": [], "price_scale": 1000000000000}',
+        encoding="utf-8",
+    )
+    shown = snapshot(tmp_path)["books"]["paper/sleeve_major"]
+    assert shown == {"error": "книга отвергнута"}
+
+
+def test_an_empty_book_does_not_pretend_the_book_was_read(tmp_path) -> None:
+    from spotbot.config import Config
+    from spotbot.engine import _close_positions
+    from spotbot.state import Book
+
+    class _Quiet:
+        def symbol_rule(self, _symbol: str) -> None:
+            raise AssertionError("no coin to price")
+
+        def book_top(self, _symbol: str) -> tuple[int, int]:
+            raise AssertionError("no coin to price")
+
+    cfg = Config(
+        symbols=("BTCUSDT",),
+        paper_cash_micro=0,
+        interval_sec=60,
+        max_positions=1,
+        alloc_bps=10_000,
+        min_notional_micro=1,
+        rsi_buy=35,
+        stop_bps=350,
+        take_bps=700,
+        trail_arm_bps=300,
+        trail_gap_bps=200,
+        live=False,
+        mode="rsi",
+        taker_bps=5,
+        daily_loss_bps=500,
+        stop_cooldown_sec=0,
+        symbol_lock=True,
+        api_key="",
+        api_secret="",
+    )
+    book = Book(cash_micro=1_000_000, positions=[], realized_micro=0, seen_at=50)
+    closed, marks, unmarked = _close_positions(cfg, _Quiet(), book, tmp_path / "empty.json", "book", True)
+    assert closed == 0 and unmarked == () and marks == {}
+    assert book.seen_at == 50
+
+
+def test_rules_lost_on_the_sell_stay_on_the_page(tmp_path) -> None:
+    from spotbot.config import Config
+    from spotbot.engine import _close_positions, _now_sec
+    from spotbot.mexc import MexcError
+    from spotbot.rules import SymbolRule
+    from spotbot.state import Book, Position
+
+    entry = 100_000_000_000_000
+    bid = 90_000_000_000_000
+    calls = {"n": 0}
+
+    class _Late:
+        def symbol_rule(self, symbol: str) -> SymbolRule:
+            calls["n"] += 1
+            if calls["n"] >= 3:
+                raise MexcError("rules")
+            return SymbolRule(symbol, True, "", 5, 1, 1, 0, "BTC")
+
+        def book_top(self, _symbol: str) -> tuple[int, int]:
+            return bid, bid + 1
+
+    cfg = Config(
+        symbols=("BTCUSDT",),
+        paper_cash_micro=0,
+        interval_sec=60,
+        max_positions=1,
+        alloc_bps=10_000,
+        min_notional_micro=1,
+        rsi_buy=35,
+        stop_bps=350,
+        take_bps=700,
+        trail_arm_bps=300,
+        trail_gap_bps=200,
+        live=False,
+        mode="rsi",
+        taker_bps=5,
+        daily_loss_bps=500,
+        stop_cooldown_sec=0,
+        symbol_lock=True,
+        api_key="",
+        api_secret="",
+    )
+    held = Position("BTCUSDT", entry, entry, 10_000_000, 100_000_000, "test")
+    seen = _now_sec()
+    book = Book(cash_micro=0, positions=[held], realized_micro=0, seen_at=seen)
+    closed, _marks, unmarked = _close_positions(cfg, _Late(), book, tmp_path / "late-rules.json", "book", True)
+    assert closed == 0 and unmarked == () and book.cash_micro == 0
+    assert held.rules_ok is False and book.seen_at >= seen
+
+
+def test_a_foreign_base_asset_stays_on_the_page(tmp_path) -> None:
+    from spotbot.config import Config
+    from spotbot.engine import _close_positions, _now_sec
+    from spotbot.rules import SymbolRule
+    from spotbot.state import Book, Position
+
+    entry = 100_000_000_000_000
+    bid = 90_000_000_000_000
+
+    class _Foreign:
+        def symbol_rule(self, symbol: str) -> SymbolRule:
+            return SymbolRule(symbol, True, "", 5, 1, 1, 0, "ETH")
+
+        def book_top(self, _symbol: str) -> tuple[int, int]:
+            return bid, bid + 1
+
+    cfg = Config(
+        symbols=("BTCUSDT",),
+        paper_cash_micro=0,
+        interval_sec=60,
+        max_positions=1,
+        alloc_bps=10_000,
+        min_notional_micro=1,
+        rsi_buy=35,
+        stop_bps=350,
+        take_bps=700,
+        trail_arm_bps=300,
+        trail_gap_bps=200,
+        live=False,
+        mode="rsi",
+        taker_bps=5,
+        daily_loss_bps=500,
+        stop_cooldown_sec=0,
+        symbol_lock=True,
+        api_key="",
+        api_secret="",
+    )
+    held = Position("BTCUSDT", entry, entry, 10_000_000, 100_000_000, "test")
+    book = Book(cash_micro=0, positions=[held], realized_micro=0, seen_at=_now_sec())
+    closed, _marks, unmarked = _close_positions(cfg, _Foreign(), book, tmp_path / "asset.json", "book", True)
+    assert closed == 0 and unmarked == () and book.cash_micro == 0
+    assert held.asset_ok is False and held.rules_ok is True
+    raw = held.to_json()
+    raw.pop("asset_ok")
+    assert Position.from_json(raw).asset_ok is True
+
+
+def test_a_locked_coin_stays_on_the_page(tmp_path) -> None:
+    from spotbot.config import Config
+    from spotbot.engine import _close_positions, _now_sec
+    from spotbot.rules import SymbolRule
+    from spotbot.state import Book, Position
+
+    entry = 100_000_000_000_000
+    bid = 90_000_000_000_000
+
+    class _Locked:
+        def symbol_rule(self, symbol: str) -> SymbolRule:
+            return SymbolRule(symbol, True, "", 5, 1, 1, 0, "BTC")
+
+        def book_top(self, _symbol: str) -> tuple[int, int]:
+            return bid, bid + 1
+
+        def spot_balances(self) -> tuple[int, int, dict[str, int], dict[str, int]]:
+            return 0, 0, {"BTC": 0}, {"BTC": 0}
+
+        def market_sell_base(self, _symbol: str, _atoms: int, _client_id: str) -> None:
+            raise AssertionError("a locked coin is not sold")
+
+    cfg = Config(
+        symbols=("BTCUSDT",),
+        paper_cash_micro=0,
+        interval_sec=60,
+        max_positions=1,
+        alloc_bps=10_000,
+        min_notional_micro=1,
+        rsi_buy=35,
+        stop_bps=350,
+        take_bps=700,
+        trail_arm_bps=300,
+        trail_gap_bps=200,
+        live=True,
+        mode="rsi",
+        taker_bps=5,
+        daily_loss_bps=500,
+        stop_cooldown_sec=0,
+        symbol_lock=True,
+        api_key="",
+        api_secret="",
+    )
+    held = Position("BTCUSDT", entry, entry, 10_000_000, 100_000_000, "test")
+    book = Book(cash_micro=0, positions=[held], realized_micro=0, seen_at=_now_sec(), ledger="live")
+    closed, _marks, unmarked = _close_positions(cfg, _Locked(), book, tmp_path / "locked.json", "book", True)
+    assert closed == 0 and unmarked == () and book.cash_micro == 0
+    assert held.free_ok is False and held.asset_ok is True and held.rules_ok is True
+    raw = held.to_json()
+    raw.pop("free_ok")
+    assert Position.from_json(raw).free_ok is True
+
+
+def test_an_unread_balance_is_not_called_a_lock(tmp_path) -> None:
+    from spotbot.config import Config
+    from spotbot.engine import _close_positions, _now_sec
+    from spotbot.mexc import MexcError
+    from spotbot.rules import SymbolRule
+    from spotbot.state import Book, Position
+
+    entry = 100_000_000_000_000
+    bid = 90_000_000_000_000
+
+    class _Unread:
+        def symbol_rule(self, symbol: str) -> SymbolRule:
+            return SymbolRule(symbol, True, "", 5, 1, 1, 0, "BTC")
+
+        def book_top(self, _symbol: str) -> tuple[int, int]:
+            return bid, bid + 1
+
+        def spot_balances(self) -> tuple[int, int, dict[str, int], dict[str, int]]:
+            raise MexcError("balance")
+
+        def market_sell_base(self, _symbol: str, _atoms: int, _client_id: str) -> None:
+            raise AssertionError("an unread balance is not sold")
+
+    cfg = Config(
+        symbols=("BTCUSDT",),
+        paper_cash_micro=0,
+        interval_sec=60,
+        max_positions=1,
+        alloc_bps=10_000,
+        min_notional_micro=1,
+        rsi_buy=35,
+        stop_bps=350,
+        take_bps=700,
+        trail_arm_bps=300,
+        trail_gap_bps=200,
+        live=True,
+        mode="rsi",
+        taker_bps=5,
+        daily_loss_bps=500,
+        stop_cooldown_sec=0,
+        symbol_lock=True,
+        api_key="",
+        api_secret="",
+    )
+    held = Position("BTCUSDT", entry, entry, 10_000_000, 100_000_000, "test")
+    book = Book(cash_micro=0, positions=[held], realized_micro=0, seen_at=_now_sec(), ledger="live")
+    closed, _marks, unmarked = _close_positions(cfg, _Unread(), book, tmp_path / "balance.json", "book", True)
+    assert closed == 0 and unmarked == () and book.cash_micro == 0
+    assert held.balance_ok is False and held.free_ok is True
+    raw = held.to_json()
+    raw.pop("balance_ok")
+    assert Position.from_json(raw).balance_ok is True
+
+
+def test_an_unsellable_coin_is_not_counted_as_cash() -> None:
+    from spotbot.engine import _unpriced_why
+    from spotbot.guards import marked_equity
+    from spotbot.state import Book, Position
+
+    bid = 100_000_000_000_000
+    marks = {"BTCUSDT": bid}
+    fees = {"BTCUSDT": 5}
+    foreign = Position("BTCUSDT", bid, bid, 1_000_000, 100_000_000, "test", asset_ok=False)
+    locked = Position("BTCUSDT", bid, bid, 1_000_000, 100_000_000, "test", free_ok=False)
+    unread = Position("BTCUSDT", bid, bid, 1_000_000, 100_000_000, "test", balance_ok=False)
+    assert marked_equity(2_000_000, [foreign], marks, fees) is None
+    assert marked_equity(2_000_000, [locked], marks, fees) is None
+    assert marked_equity(2_000_000, [unread], marks, fees) is None
+    assert _unpriced_why(Book(cash_micro=2_000_000, positions=[foreign], realized_micro=0)) == "base asset does not match"
+    assert _unpriced_why(Book(cash_micro=2_000_000, positions=[locked], realized_micro=0)) == "the coin is not free"
+    assert _unpriced_why(Book(cash_micro=2_000_000, positions=[unread], realized_micro=0)) == "exchange balance was not read"
+    sellable = Position("BTCUSDT", bid, bid, 1_000_000, 100_000_000, "test")
+    priced = marked_equity(2_000_000, [sellable], marks, fees)
+    assert priced is not None and priced > 2_000_000
+
+
+def test_a_paper_entry_writes_the_debit_and_the_fee(tmp_path) -> None:
+    import time
+
+    from spotbot.config import Config
+    from spotbot.engine import _try_buy
+    from spotbot.rules import SymbolRule
+    from spotbot.state import Book
+
+    price = 100_000_000_000_000
+
+    class _Book:
+        def symbol_rule(self, symbol: str) -> SymbolRule:
+            return SymbolRule(symbol, True, "", 5, 1, 1, 0, "BTC", 1)
+
+        def book_top(self, _symbol: str) -> tuple[int, int]:
+            return price, price
+
+        def depth_notional(self, _symbol: str) -> tuple[int, int]:
+            return 2, 1
+
+    cfg = Config(
+        symbols=("BTCUSDT",),
+        paper_cash_micro=100_000_000,
+        interval_sec=60,
+        max_positions=1,
+        alloc_bps=10_000,
+        min_notional_micro=1,
+        rsi_buy=35,
+        stop_bps=350,
+        take_bps=700,
+        trail_arm_bps=300,
+        trail_gap_bps=200,
+        live=False,
+        mode="rsi",
+        taker_bps=5,
+        daily_loss_bps=500,
+        stop_cooldown_sec=0,
+        symbol_lock=True,
+        entries=True,
+        api_key="",
+        api_secret="",
+    )
+    book = Book(cash_micro=100_000_000, positions=[], realized_micro=0)
+    opened = _try_buy(
+        cfg,
+        _Book(),
+        book,
+        tmp_path / "buy.json",
+        "book",
+        "BTCUSDT",
+        price,
+        "test",
+        time.monotonic() + 30,
+    )
+    assert opened is True and book.positions and book.fees_micro > 0
+    text = (tmp_path / "ops_events.jsonl").read_text(encoding="utf-8")
+    assert '"debit":' in text and '"fee":' in text and book.cash_micro == 100_000_000 - book.positions[0].quote_micro
+
+
+def test_an_unread_pair_is_not_asked_again_for_the_fee() -> None:
+    from spotbot.engine import _exit_fees, _unpriced_why
+    from spotbot.guards import marked_equity
+    from spotbot.mexc import MexcError
+    from spotbot.rules import SymbolRule
+    from spotbot.state import Book, Position
+
+    class _Neighbor:
+        def symbol_rule(self, symbol: str) -> SymbolRule:
+            assert symbol == "ETHUSDT"
+            return SymbolRule(symbol, True, "", 5, 1, 1, 0, "ETH")
+
+    unread = Position("BTCUSDT", 100, 100, 5_000_000, 100_000_000, "test", rules_ok=False)
+    neighbor = Position("ETHUSDT", 100, 100, 5_000_000, 100_000_000, "test")
+    book = Book(cash_micro=1_000_000, positions=[unread, neighbor], realized_micro=0)
+    assert _exit_fees(_Neighbor(), book) == {"ETHUSDT": 5}
+    assert marked_equity(book.cash_micro, book.positions, {"ETHUSDT": 100}, {"ETHUSDT": 5}) is None
+    assert _unpriced_why(book) == "pair rules were not read"
+    clear = Book(cash_micro=1_000_000, positions=[neighbor], realized_micro=0)
+    assert _unpriced_why(clear) == "equity is not priced after the sell fee"
+
+    class _Refuse:
+        def symbol_rule(self, _symbol: str) -> SymbolRule:
+            raise MexcError("rules")
+
+    alone = Book(cash_micro=1, positions=[unread], realized_micro=0)
+    assert _exit_fees(_Refuse(), alone) == {}
+
+
+def test_an_unsellable_coin_does_not_blank_the_book() -> None:
+    from spotbot.engine import _exit_fees, open_loss_micro
+    from spotbot.fees import paper_sell
+    from spotbot.guards import marked_equity
+    from spotbot.mexc import MexcError
+    from spotbot.rules import SymbolRule
+    from spotbot.state import Book, Position
+
+    class _Rules:
+        def symbol_rule(self, symbol: str) -> SymbolRule:
+            if symbol == "BTCUSDT":
+                raise MexcError("rules")
+            return SymbolRule(symbol, True, "", 5, 1, 1, 0, "ETH")
+
+    price = 100_000_000_000_000
+    dust = Position("BTCUSDT", price, price, 5_000_000, 50_000_000, "test", below_lot=True)
+    live = Position("ETHUSDT", price, price, 1, 100_000_000, "test")
+    book = Book(cash_micro=1_000_000, positions=[dust, live], realized_micro=0)
+    fees = _exit_fees(_Rules(), book)
+    assert fees == {"ETHUSDT": 5}
+    credit, _fee = paper_sell(100_000_000, price, 5)
+    marks = {"ETHUSDT": price}
+    assert marked_equity(book.cash_micro, book.positions, marks, fees) == 1_000_000 + credit
+    assert open_loss_micro(book.positions, marks, fees) == 5_000_000
 
 
 def test_new_entries_stay_off_and_exits_still_run(tmp_path, monkeypatch) -> None:
@@ -5398,6 +6199,18 @@ def test_one_unreadable_sleeve_does_not_stop_the_others(tmp_path) -> None:
     assert (paper / "sleeve_major.json").read_text(encoding="utf-8") == "{"
 
 
+def test_a_deposit_is_not_shown_as_a_trade(tmp_path) -> None:
+    from spotbot.sleeves import apply_funding
+
+    assert apply_funding(tmp_path, 3_000_000) == (1_000_000, 1_000_000, 1_000_000)
+    text = (tmp_path / "ops_events.jsonl").read_text(encoding="utf-8")
+    assert text.count('"kind": "funding"') == 3
+    assert text.count('"credit": "1.000000"') == 3
+    assert '"reason": "deposit"' in text
+    assert apply_funding(tmp_path, 3_000_000) == (0, 0, 0)
+    assert (tmp_path / "ops_events.jsonl").read_text(encoding="utf-8").count('"kind": "funding"') == 3
+
+
 def test_a_missing_sleeve_is_not_rebuilt_from_the_main_balance(tmp_path) -> None:
     from spotbot.config import Config
     from spotbot.sleeves import apply_funding, run_sleeves
@@ -5564,13 +6377,14 @@ def test_ops_snapshot_drops_secrets(tmp_path) -> None:
         ),
         encoding="utf-8",
     )
-    (tmp_path / "ops.log").write_text("cycle ok\napi_secret=hidden\n", encoding="utf-8")
+    (tmp_path / "ops.log").write_text("cycle ok\napi_secret=hidden\npassword=sekret\n", encoding="utf-8")
     note_event(tmp_path, book="major", kind="exit", symbol="BTCUSDT", reason="stop", price="100.000000")
     note_quote(tmp_path, "BTCUSDT", "100.000000", "100.010000", "100.020000", "-", -1, 2)
     view = snapshot(tmp_path, 19280)
     text = json.dumps(view)
     assert "do-not-show" not in text
     assert "hidden" not in text
+    assert "sekret" not in text
     assert view["books"]["sleeve_major"]["cash_micro"] == "33.333334"
     assert view["events"][-1]["symbol"] == "BTCUSDT"
     assert view["quotes"]["BTCUSDT"]["lag_bps"] == -1
@@ -5579,7 +6393,7 @@ def test_ops_snapshot_drops_secrets(tmp_path) -> None:
     (tmp_path / "paper" / "book.json").write_text("{", encoding="utf-8")
     (tmp_path / "ops_events.jsonl").write_text("not-json\n", encoding="utf-8")
     broken = snapshot(tmp_path, 19280)
-    assert broken["books"]["paper/book"] == {"error": "book is not json"}
+    assert broken["books"]["paper/book"] == {"error": "книга не читается"}
     assert broken["books"]["sleeve_major"]["cash_micro"] == "33.333334"
     wide = tmp_path / "sleeve_alt.json"
     wide.write_text(
@@ -5587,10 +6401,8 @@ def test_ops_snapshot_drops_secrets(tmp_path) -> None:
         encoding="utf-8",
     )
     shown = snapshot(tmp_path, 19280)["books"]["sleeve_alt"]
-    assert shown["cash_micro"] == "100000000000000.000000"
-    assert shown["realized_micro"] == "unreadable"
-    assert shown["positions"] == "unreadable"
-    assert "unreadable" == _shown_price()
+    assert shown == {"error": "книга отвергнута"}
+    assert "не читается" == _shown_price()
 
 
 def _shown_price() -> str:
@@ -5815,6 +6627,286 @@ def test_closing_one_coin_still_sees_the_next() -> None:
     assert record_sell_fill(doubled, "BTCUSDT", 100_000_000, 9_000_000, 0, full)
     assert doubled.positions == [dust]
     assert dust.base_atoms == 1_000
+
+
+def test_a_partial_sell_does_not_drop_its_cost() -> None:
+    from spotbot.state import Book, Position, record_sell_fill
+
+    book = Book(
+        cash_micro=0,
+        positions=[Position("BTCUSDT", 1, 1, 1, 100_000_000, "test")],
+        realized_micro=0,
+    )
+    assert record_sell_fill(book, "BTCUSDT", 50_000_000, 1, 0) is False
+    assert book.cash_micro == 0 and book.realized_micro == 0
+    assert book.positions[0].quote_micro == 1
+    assert book.positions[0].base_atoms == 100_000_000
+
+
+def test_a_recovered_sell_is_written_once(tmp_path) -> None:
+    from spotbot.engine import _record_progress, _resolve_pending
+    from spotbot.state import Book, Position, remember_pending
+
+    class _Filled:
+        def order_by_client(self, _symbol: str, _client_id: str) -> dict[str, str]:
+            return {
+                "symbol": "BTCUSDT",
+                "side": "SELL",
+                "type": "MARKET",
+                "clientOrderId": "sell1",
+                "orderId": "9",
+                "status": "FILLED",
+                "executedQty": "1",
+                "cummulativeQuoteQty": "10",
+            }
+
+        def my_trades(self, _symbol: str, order_id: str = "") -> list[object]:
+            assert order_id == "9"
+            return [{
+                "id": "1",
+                "orderId": "9",
+                "symbol": "BTCUSDT",
+                "qty": "1",
+                "quoteQty": "10",
+                "price": "10",
+                "commission": "0",
+                "commissionAsset": "USDT",
+                "isBuyer": False,
+            }]
+
+    book = Book(
+        cash_micro=0,
+        positions=[Position("BTCUSDT", 10_000_000_000_000, 10_000_000_000_000, 10_000_000, 100_000_000, "test")],
+        realized_micro=0,
+    )
+    remember_pending(book, "sell1", "BTCUSDT", "SELL", 100_000_000)
+    book.pending_open_base = 100_000_000
+    book.pending_open_quote = 10_000_000
+    path = tmp_path / "book.json"
+    assert _resolve_pending(_Filled(), book, path) is None
+    assert book.cash_micro == 10_000_000 and book.positions == []
+    assert book.pending_client_id == ""
+    text = (tmp_path / "ops_events.jsonl").read_text(encoding="utf-8")
+    assert text.count("\n") == 1
+    assert '"reason": "recovered"' in text
+    assert '"credit": "10.000000"' in text
+    assert '"size": "1"' in text
+    assert '"left": false' in text
+    done = Book(cash_micro=10_000_000, positions=[], realized_micro=0)
+    remember_pending(done, "sell1", "BTCUSDT", "SELL", 100_000_000)
+    done.pending_open_base = 100_000_000
+    done.pending_applied_atoms = 100_000_000
+    done.pending_applied_quote = 10_000_000
+    assert _record_progress(_Filled(), done, path, {"orderId": "9"}, 100_000_000, 10_000_000, 10_000_000_000_000)
+    assert (tmp_path / "ops_events.jsonl").read_text(encoding="utf-8").count("\n") == 1
+
+
+def test_a_recovered_slice_keeps_its_own_price(tmp_path) -> None:
+    from spotbot.engine import _resolve_pending
+    from spotbot.state import Book, Position, remember_pending
+
+    step = {"n": 0}
+
+    class _Slices:
+        def order_by_client(self, _symbol: str, _client_id: str) -> dict[str, str]:
+            step["n"] += 1
+            if step["n"] == 1:
+                return {
+                    "symbol": "BTCUSDT",
+                    "side": "SELL",
+                    "type": "MARKET",
+                    "clientOrderId": "sell1",
+                    "orderId": "9",
+                    "status": "PARTIALLY_FILLED",
+                    "executedQty": "0.5",
+                    "cummulativeQuoteQty": "5",
+                }
+            return {
+                "symbol": "BTCUSDT",
+                "side": "SELL",
+                "type": "MARKET",
+                "clientOrderId": "sell1",
+                "orderId": "9",
+                "status": "FILLED",
+                "executedQty": "1",
+                "cummulativeQuoteQty": "20",
+            }
+
+        def my_trades(self, _symbol: str, order_id: str = "") -> list[object]:
+            assert order_id == "9"
+            if step["n"] == 1:
+                qty, quote, price = "0.5", "5", "10"
+            else:
+                qty, quote, price = "1", "20", "20"
+            return [{
+                "id": "1",
+                "orderId": "9",
+                "symbol": "BTCUSDT",
+                "qty": qty,
+                "quoteQty": quote,
+                "price": price,
+                "commission": "0",
+                "commissionAsset": "USDT",
+                "isBuyer": False,
+            }]
+
+    book = Book(
+        cash_micro=0,
+        positions=[Position("BTCUSDT", 10_000_000_000_000, 10_000_000_000_000, 10_000_000, 100_000_000, "test")],
+        realized_micro=0,
+    )
+    remember_pending(book, "sell1", "BTCUSDT", "SELL", 100_000_000)
+    book.pending_open_base = 100_000_000
+    book.pending_open_quote = 10_000_000
+    path = tmp_path / "book.json"
+    assert _resolve_pending(_Slices(), book, path) is not None
+    assert book.cash_micro == 5_000_000
+    assert book.positions[0].base_atoms == 50_000_000
+    assert _resolve_pending(_Slices(), book, path) is None
+    assert book.cash_micro == 20_000_000 and book.positions == []
+    lines = (tmp_path / "ops_events.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    assert '"price": "10"' in lines[0] and '"credit": "5.000000"' in lines[0] and '"size": "0.5"' in lines[0]
+    assert '"price": "30"' in lines[1] and '"credit": "15.000000"' in lines[1] and '"size": "0.5"' in lines[1]
+
+
+def test_a_recovered_fee_does_not_invent_a_coin_size(tmp_path) -> None:
+    from spotbot.engine import _resolve_pending
+    from spotbot.state import Book, Position, remember_pending
+
+    step = {"n": 0}
+
+    class _Fee:
+        def order_by_client(self, _symbol: str, _client_id: str) -> dict[str, str]:
+            step["n"] += 1
+            return {
+                "symbol": "BTCUSDT",
+                "side": "SELL",
+                "type": "MARKET",
+                "clientOrderId": "sell1",
+                "orderId": "9",
+                "status": "PARTIALLY_FILLED",
+                "executedQty": "0.5",
+                "cummulativeQuoteQty": "5",
+            }
+
+        def my_trades(self, _symbol: str, order_id: str = "") -> list[object]:
+            assert order_id == "9"
+            return [{
+                "id": "1",
+                "orderId": "9",
+                "symbol": "BTCUSDT",
+                "qty": "0.5",
+                "quoteQty": "5",
+                "price": "10",
+                "commission": "0" if step["n"] == 1 else "0.01",
+                "commissionAsset": "USDT",
+                "isBuyer": False,
+            }]
+
+    book = Book(
+        cash_micro=0,
+        positions=[Position("BTCUSDT", 10_000_000_000_000, 10_000_000_000_000, 10_000_000, 100_000_000, "test")],
+        realized_micro=0,
+    )
+    remember_pending(book, "sell1", "BTCUSDT", "SELL", 100_000_000)
+    book.pending_open_base = 100_000_000
+    book.pending_open_quote = 10_000_000
+    path = tmp_path / "book.json"
+    assert _resolve_pending(_Fee(), book, path) is not None
+    assert _resolve_pending(_Fee(), book, path) is not None
+    assert book.cash_micro == 4_990_000
+    assert book.positions[0].base_atoms == 50_000_000
+    lines = (tmp_path / "ops_events.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    assert '"size": "0.5"' in lines[0]
+    assert '"kind": "fee"' in lines[1]
+    assert '"size": "0"' in lines[1]
+    assert '"price": "-"' in lines[1]
+    assert '"fee": "0.010000"' in lines[1]
+    assert '"credit": "-0.010000"' in lines[1]
+
+
+def test_a_shrunk_coin_is_not_written_as_zero(tmp_path) -> None:
+    from spotbot.engine import _note_progress
+    from spotbot.state import Book, Position
+
+    book = Book(
+        cash_micro=10_000_000,
+        positions=[Position("BTCUSDT", 10_000_000_000_000, 10_000_000_000_000, 10_000_000, 90_000_000, "test")],
+        realized_micro=0,
+    )
+    _note_progress(tmp_path / "book.json", book, "BUY", "BTCUSDT", 10_000_000_000_000, (10_000_000, 0, 100_000_000))
+    text = (tmp_path / "ops_events.jsonl").read_text(encoding="utf-8")
+    assert '"kind": "fee"' in text
+    assert '"size": "-0.1"' in text
+    assert '"price": "-"' in text
+    assert '"size": "0"' not in text
+
+
+def test_a_recovered_buy_slice_keeps_its_own_price(tmp_path) -> None:
+    from spotbot.engine import _resolve_pending
+    from spotbot.state import Book, remember_pending
+
+    step = {"n": 0}
+
+    class _Slices:
+        def order_by_client(self, _symbol: str, _client_id: str) -> dict[str, str]:
+            step["n"] += 1
+            if step["n"] == 1:
+                return {
+                    "symbol": "BTCUSDT",
+                    "side": "BUY",
+                    "type": "MARKET",
+                    "clientOrderId": "buy1",
+                    "orderId": "9",
+                    "status": "PARTIALLY_FILLED",
+                    "executedQty": "0.5",
+                    "cummulativeQuoteQty": "5",
+                }
+            return {
+                "symbol": "BTCUSDT",
+                "side": "BUY",
+                "type": "MARKET",
+                "clientOrderId": "buy1",
+                "orderId": "9",
+                "status": "FILLED",
+                "executedQty": "1",
+                "cummulativeQuoteQty": "20",
+            }
+
+        def my_trades(self, _symbol: str, order_id: str = "") -> list[object]:
+            assert order_id == "9"
+            if step["n"] == 1:
+                qty, quote, price = "0.5", "5", "10"
+            else:
+                qty, quote, price = "1", "20", "20"
+            return [{
+                "id": "1",
+                "orderId": "9",
+                "symbol": "BTCUSDT",
+                "qty": qty,
+                "quoteQty": quote,
+                "price": price,
+                "commission": "0",
+                "commissionAsset": "USDT",
+                "isBuyer": True,
+            }]
+
+    book = Book(cash_micro=20_000_000, positions=[], realized_micro=0)
+    remember_pending(book, "buy1", "BTCUSDT", "BUY", 0, 20_000_000)
+    path = tmp_path / "book.json"
+    assert _resolve_pending(_Slices(), book, path) is not None
+    assert book.cash_micro == 15_000_000
+    assert book.positions[0].base_atoms == 50_000_000
+    assert _resolve_pending(_Slices(), book, path) is None
+    assert book.cash_micro == 0
+    assert book.positions[0].base_atoms == 100_000_000
+    assert book.positions[0].entry_micro == 20_000_000_000_000
+    lines = (tmp_path / "ops_events.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    assert '"price": "10"' in lines[0] and '"debit": "5.000000"' in lines[0] and '"size": "0.5"' in lines[0]
+    assert '"price": "30"' in lines[1] and '"debit": "15.000000"' in lines[1] and '"size": "0.5"' in lines[1]
 
 
 def test_buy_fill_is_recorded_once() -> None:

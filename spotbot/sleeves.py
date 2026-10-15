@@ -14,6 +14,7 @@ from pathlib import Path
 
 from spotbot.config import Config
 from spotbot.engine import run_cycle
+from spotbot.journal import note_event, ops_root
 from spotbot.mexc import MexcClient, MexcError, MexcRateLimit
 from spotbot.money import format_usdt
 from spotbot.state import Book, LedgerError, load_book, save_book, structure_too_deep, usdt_symbol_ok, write_atomic
@@ -217,6 +218,14 @@ def apply_funding(data_dir: Path, main_micro: int, live: bool = False) -> tuple[
         book.cash_micro += part
         book.credited_main_micro = main_micro
         save_book(path, book)
+        if part > 0:
+            note_event(
+                ops_root(path),
+                book=path.stem,
+                kind="funding",
+                reason="deposit",
+                credit=format_usdt(part),
+            )
         parts.append(part)
     _write_treasury(treasury, main_micro)
     if main_micro - funded:

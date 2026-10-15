@@ -41,6 +41,10 @@ class Position:
     exchange_order_id: str = ""
     hold_flat: bool = False
     below_lot: bool = False
+    rules_ok: bool = True
+    asset_ok: bool = True
+    free_ok: bool = True
+    balance_ok: bool = True
 
     def to_json(self) -> dict[str, object]:
         return asdict(self)
@@ -65,6 +69,10 @@ class Position:
             exchange_order_id=_text(raw.get("exchange_order_id"), "exchange_order_id"),
             hold_flat=_flag(raw.get("hold_flat", False), "gap hold"),
             below_lot=_flag(raw.get("below_lot", False), "below lot"),
+            rules_ok=_flag(raw.get("rules_ok", True), "pair rules"),
+            asset_ok=_flag(raw.get("asset_ok", True), "base asset"),
+            free_ok=_flag(raw.get("free_ok", True), "free coin"),
+            balance_ok=_flag(raw.get("balance_ok", True), "exchange balance"),
         )
 
 
@@ -470,6 +478,14 @@ def audit_book(book: Book) -> None:
             raise LedgerError("gap hold is not a flag")
         if not isinstance(pos.below_lot, bool):
             raise LedgerError("below lot is not a flag")
+        if not isinstance(pos.rules_ok, bool):
+            raise LedgerError("pair rules are not a flag")
+        if not isinstance(pos.asset_ok, bool):
+            raise LedgerError("base asset is not a flag")
+        if not isinstance(pos.free_ok, bool):
+            raise LedgerError("free coin is not a flag")
+        if not isinstance(pos.balance_ok, bool):
+            raise LedgerError("exchange balance is not a flag")
         if book.pending_side == "SELL" and book.pending_client_id and pos.client_order_id == book.pending_client_id:
             raise LedgerError("sell client id is already on a position")
         if (
@@ -894,6 +910,7 @@ def record_sell_fill(
     """Credit a sell. A partial fill keeps the unsold base on the position.
 
     Two rows of the same pair are not guessed. Pass the row that was sent.
+    A partial whose cost share rounds to zero is refused.
     """
     if not isinstance(symbol, str):
         return False
@@ -917,6 +934,8 @@ def record_sell_fill(
     if sold_atoms > pos.base_atoms:
         return False
     released = pos.quote_micro if sold_atoms == pos.base_atoms else pos.quote_micro * sold_atoms // pos.base_atoms
+    if sold_atoms < pos.base_atoms and pos.quote_micro > 0 and released <= 0:
+        return False
     realized = book.realized_micro + credit_micro - released
     if realized >= _MAX_BOOK or realized <= -_MAX_BOOK:
         return False

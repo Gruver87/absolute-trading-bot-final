@@ -47,7 +47,7 @@ def snapshot(data_dir: Path, port: int = DEFAULT_PORT) -> dict[str, object]:
         return {
             "bind": f"127.0.0.1:{port}",
             "mesh_ports": "18180-18182",
-            "books": {"error": "data dir is not a directory"},
+            "books": {"error": "папка данных не читается"},
             "quotes": {},
             "events": [],
             "log": [],
@@ -65,16 +65,31 @@ def snapshot(data_dir: Path, port: int = DEFAULT_PORT) -> dict[str, object]:
             try:
                 too_big = path.stat().st_size > 1_000_000
             except OSError:
-                books[key] = {"error": "book is not json"}
+                books[key] = {"error": "книга не читается"}
                 continue
             if too_big:
-                books[key] = {"error": "book file is too large"}
+                books[key] = {"error": "файл книги слишком большой"}
                 continue
             loaded = _read_json(path)
             if not isinstance(loaded, dict):
-                books[key] = {"error": "book is not json"}
+                books[key] = {"error": "книга не читается"}
+                continue
+            from spotbot.state import LedgerError, load_book
+
+            try:
+                load_book(path, 0)
+            except LedgerError:
+                books[key] = {"error": "книга отвергнута"}
                 continue
             books[key] = _show_book(loaded)
+    for folder in ("paper", "live"):
+        sleeves = ("sleeve_major", "sleeve_alt", "sleeve_meme")
+        if not any((data_dir / folder / f"{name}.json").exists() for name in sleeves):
+            continue
+        for name in sleeves:
+            key = f"{folder}/{name}"
+            if key not in books:
+                books[key] = {"error": "книги нет"}
     return {
         "bind": f"127.0.0.1:{port}",
         "mesh_ports": "18180-18182",
@@ -91,9 +106,9 @@ def _status_bytes(data_dir: Path, port: int, limit: int = 1_000_000) -> bytes:
     try:
         body = json.dumps(snapshot(data_dir, port), ensure_ascii=False).encode("utf-8")
     except (OSError, UnicodeError, ValueError, TypeError, RecursionError, MemoryError) as exc:
-        raise OpsError("status unreadable") from exc
+        raise OpsError("status не читается") from exc
     if len(body) > limit:
-        raise OpsError("status unreadable")
+        raise OpsError("status не читается")
     return body
 
 
@@ -125,7 +140,7 @@ class _Handler(BaseHTTPRequestHandler):
             try:
                 body = _status_bytes(data_dir, port)
             except OpsError:
-                self._send(500, "text/plain; charset=utf-8", b"status unreadable")
+                self._send(500, "text/plain; charset=utf-8", "status не читается".encode("utf-8"))
                 return
             self._send(200, "application/json; charset=utf-8", body)
             return
@@ -159,21 +174,64 @@ def _show_book(loaded: object) -> object:
     view = _public(loaded)
     if not isinstance(view, dict) or not isinstance(loaded, dict):
         return view
-    for key in ("cash_micro", "realized_micro", "fees_micro", "funded_micro", "guard_cash_micro"):
-        if key in view:
+    for key in (
+        "cash_micro",
+        "realized_micro",
+        "fees_micro",
+        "funded_micro",
+        "guard_cash_micro",
+        "guard_realized_micro",
+        "equity_peak_micro",
+        "credited_main_micro",
+        "pending_quote_micro",
+        "pending_applied_quote",
+        "pending_applied_fee",
+        "pending_ack_fee",
+        "pending_open_quote",
+    ):
+        if key in view and view[key] is not None:
             view[key] = _money_text(view[key])
+    for key in (
+        "pending_base_atoms",
+        "pending_applied_atoms",
+        "pending_applied_base_fee",
+        "pending_ack_base_fee",
+        "pending_open_base",
+    ):
+        if key in view and view[key] is not None:
+            view[key] = _atom_text(view[key])
+    view["seen"] = _seen_text(loaded.get("seen_at"))
+    view["pause"] = _pause_text(loaded.get("cooldown_until"))
+    view.pop("seen_at", None)
+    view.pop("cooldown_until", None)
+    view.pop("pair_stops", None)
+    pending_id = view.get("pending_client_id")
+    view["pending_client_id"] = isinstance(pending_id, str) and pending_id != ""
+    view.pop("pending_exchange_order_id", None)
+    locks = loaded.get("pair_lock_until")
+    if not isinstance(locks, dict):
+        locks = {}
+    view.pop("pair_lock_until", None)
     positions = view.get("positions")
+    open_symbols: set[str] = set()
+    if isinstance(positions, list) and len(positions) <= 8:
+        for pos in positions:
+            if isinstance(pos, dict) and len(pos) <= 16 and isinstance(pos.get("symbol"), str):
+                open_symbols.add(pos["symbol"])
+    view["locks"] = _closed_locks(locks, open_symbols)
     if not isinstance(positions, list) or len(positions) > 8:
         if isinstance(positions, list):
-            view["positions"] = "unreadable"
+            view["positions"] = "не читается"
         return view
     from spotbot.money import format_price
 
     legacy = "price_scale" not in loaded
     for index, pos in enumerate(positions):
         if not isinstance(pos, dict) or len(pos) > 16:
-            positions[index] = "unreadable"
+            positions[index] = "не читается"
             continue
+        pos.pop("client_order_id", None)
+        pos.pop("exchange_order_id", None)
         if "quote_micro" in pos:
             pos["quote_micro"] = _money_text(pos["quote_micro"])
         if "base_atoms" in pos:
@@ -181,26 +239,90 @@ def _show_book(loaded: object) -> object:
         for key in ("entry_micro", "peak_micro"):
             raw = pos.get(key)
             if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0 or raw >= 10**24:
-                pos[key] = "unreadable"
+                pos[key] = "не читается"
                 continue
             shown = raw * 1_000_000 if legacy else raw
             if shown >= 10**24:
-                pos[key] = "unreadable"
+                pos[key] = "не читается"
                 continue
             pos[key] = format_price(shown)
+        pos["lock"] = _lock_text(locks.get(pos.get("symbol")))
     return view
+
+
+def _seen_text(raw: object) -> str:
+    """Age of the last book read. The cycle heartbeat is not this stamp."""
+    import time
+
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw <= 0 or raw > 4_102_444_800:
+        return "стакан ещё не читался" if not isinstance(raw, bool) and raw in (0, None) else "не читается"
+    now = time.time_ns() // 1_000_000_000
+    if raw > now:
+        return "не читается"
+    return f"стакан {now - raw} с назад"
+
+
+def _pause_text(raw: object) -> str:
+    """How long a stop still blocks a new buy. A finished pause is not shown."""
+    import time
+
+    if raw in (0, None) and not isinstance(raw, bool):
+        return ""
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0 or raw > 4_102_444_800:
+        return "не читается"
+    now = time.time_ns() // 1_000_000_000
+    if raw <= now:
+        return ""
+    return f"пауза после стопа ещё {raw - now} с"
+
+
+def _lock_text(raw: object) -> str:
+    """How long repeated stops still block this pair. A finished lock is not shown."""
+    import time
+
+    if raw in (0, None) and not isinstance(raw, bool):
+        return ""
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0 or raw > 4_102_444_800:
+        return "не читается"
+    now = time.time_ns() // 1_000_000_000
+    if raw <= now:
+        return ""
+    return f"пара закрыта ещё {raw - now} с"
+
+
+def _closed_locks(locks: dict[object, object], open_symbols: set[str]) -> str:
+    """Locks for pairs that are no longer on the book. An open coin shows its own line."""
+    if len(locks) > 14:
+        return "не читается"
+    parts: list[str] = []
+    for symbol, raw in locks.items():
+        if not isinstance(symbol, str) or not symbol or len(symbol) > 32 or symbol in open_symbols:
+            continue
+        text = _lock_text(raw)
+        if text:
+            parts.append(f"{symbol} {text}")
+    if len(parts) > 8:
+        return "не читается"
+    return ", ".join(parts)
 
 
 def _coin_text(raw: object) -> str:
     """Coin size as text. A raw atom count is not sent to the browser."""
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw <= 0 or raw >= 10**24:
+        return "не читается"
+    return _atom_text(raw)
+
+
+def _atom_text(raw: object) -> str:
+    """Coin size as text, including a real zero. An empty fill is not не читается."""
     from spotbot.money import BASE_ATOMS, MoneyError, format_fixed
 
-    if isinstance(raw, bool) or not isinstance(raw, int) or raw <= 0 or raw >= 10**24:
-        return "unreadable"
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0 or raw >= 10**24:
+        return "не читается"
     try:
         return format_fixed(raw, BASE_ATOMS)
     except MoneyError:
-        return "unreadable"
+        return "не читается"
 
 
 def _money_text(raw: object) -> str:
@@ -208,24 +330,24 @@ def _money_text(raw: object) -> str:
     from spotbot.money import format_usdt
 
     if isinstance(raw, bool) or not isinstance(raw, int) or raw <= -10**24 or raw >= 10**24:
-        return "unreadable"
+        return "не читается"
     return format_usdt(raw)
 
 
 def _public(value: object, depth: int = 0) -> object:
     if depth >= 8:
-        return "unreadable"
+        return "не читается"
     if isinstance(value, str):
         return value if len(value) <= 180 else value[:180]
     if isinstance(value, bool) or value is None:
         return value
     if isinstance(value, int):
         if value <= -10**24 or value >= 10**24:
-            return "unreadable"
+            return "не читается"
         return value
     if isinstance(value, dict):
         if len(value) > 64:
-            return "unreadable"
+            return "не читается"
         return {
             key: _public(item, depth + 1)
             for key, item in value.items()
@@ -233,9 +355,9 @@ def _public(value: object, depth: int = 0) -> object:
         }
     if isinstance(value, list):
         if len(value) > 32:
-            return "unreadable"
+            return "не читается"
         return [_public(item, depth + 1) for item in value]
-    return "unreadable"
+    return "не читается"
 
 
 def _hidden(key: str) -> bool:
@@ -296,10 +418,47 @@ def _quotes(data_dir: Path) -> dict[str, object]:
     if not isinstance(loaded, dict) or len(loaded) > 32:
         return {}
     return {
-        key: _public(value)
+        key: _show_quote(value)
         for key, value in loaded.items()
         if isinstance(key, str) and len(key) <= 32 and isinstance(_public(value), (dict, str, int))
     }
+
+
+def _show_quote(value: object) -> object:
+    """A venue price leaves as text. A raw integer is not a browser number."""
+    shown = _public(value)
+    if not isinstance(shown, dict):
+        return shown
+    for key in ("mexc", "binance", "bybit", "okx"):
+        if key in shown:
+            shown[key] = _quote_price(shown[key])
+    for key in ("lag_bps", "width_bps"):
+        if key in shown:
+            shown[key] = _quote_bps(shown[key])
+    return shown
+
+
+def _quote_price(raw: object) -> object:
+    from spotbot.money import MoneyError, format_price
+
+    if raw == "unreadable":
+        return "не читается"
+    if isinstance(raw, str) or raw is None:
+        return raw
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw <= 0 or raw >= 10**24:
+        return "не читается"
+    try:
+        return format_price(raw)
+    except MoneyError:
+        return "не читается"
+
+
+def _quote_bps(raw: object) -> object:
+    if raw is None or isinstance(raw, str):
+        return "не читается" if raw == "unreadable" else raw
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw <= -1_000_000_000 or raw >= 1_000_000_000:
+        return "не читается"
+    return raw
 
 
 def _tail_text(path: Path, limit: int) -> str:
@@ -333,8 +492,35 @@ def _events(data_dir: Path) -> list[object]:
         if isinstance(item, dict):
             shown = _public(item)
             if isinstance(shown, dict):
-                rows.append(shown)
+                rows.append(_event_money(shown))
     return rows[-50:]
+
+
+def _event_money(row: dict[str, object]) -> dict[str, object]:
+    """A stored integer must not reach the browser. Text that is already decimal stays."""
+    from spotbot.money import MoneyError, format_price
+
+    for key in ("credit", "debit", "fee", "price", "size"):
+        if row.get(key) == "unreadable":
+            row[key] = "не читается"
+    for key in ("credit", "debit", "fee"):
+        if key in row and not isinstance(row[key], str):
+            row[key] = _money_text(row[key])
+    price = row.get("price")
+    if isinstance(price, int) and not isinstance(price, bool):
+        if price <= 0 or price >= 10**24:
+            row["price"] = "не читается"
+        else:
+            try:
+                row["price"] = format_price(price)
+            except MoneyError:
+                row["price"] = "не читается"
+    size = row.get("size")
+    if isinstance(size, int) and not isinstance(size, bool):
+        row["size"] = _atom_text(size)
+    elif size is not None and not isinstance(size, str):
+        row["size"] = "не читается"
+    return row
 
 
 def _log_tail(path: Path) -> list[str]:
@@ -349,8 +535,9 @@ def _log_tail(path: Path) -> list[str]:
 
 
 def _safe_log(line: str) -> bool:
+    """The page log uses the same hidden words as the book. A password line is not shown."""
     low = line.lower()
-    return "api_key" not in low and "api_secret" not in low and "telegram_token" not in low
+    return not any(part in low for part in _HIDDEN)
 
 
 _PAGE = """<!DOCTYPE html>
@@ -429,7 +616,7 @@ function renderBooks(books) {
       continue;
     }
     let pos = "—";
-    if (book.positions === "unreadable") pos = "не читается";
+    if (book.positions === "не читается") pos = "не читается";
     else if (Array.isArray(book.positions)) {
       pos = book.positions.map(function (p) {
         if (!p || typeof p !== "object") return "не читается";
@@ -437,10 +624,22 @@ function renderBooks(books) {
         const cost = p.quote_micro == null ? "" : " · " + esc(money(p.quote_micro));
         const held = p.hold_flat === true ? " · удержание, ниже себестоимости не продаётся" : "";
         const lot = p.below_lot === true ? " · меньше шага лота, продажа не уходит" : "";
-        return esc(p.symbol) + size + " @ " + esc(shown(p.entry_micro)) + cost + held + lot;
+        const rules = p.rules_ok === false ? " · правила пары не прочитаны" : "";
+        const asset = p.asset_ok === false ? " · базовая монета не совпадает" : "";
+        const free = p.free_ok === false ? " · на бирже монета не свободна" : "";
+        const balance = p.balance_ok === false ? " · баланс биржи не прочитан" : "";
+        const lock = p.lock ? " · " + esc(p.lock) : "";
+        return esc(p.symbol) + size + " @ " + esc(shown(p.entry_micro)) + cost + held + lot + rules + asset + free + balance + lock;
       }).join(", ") || "—";
     }
-    html += "<tr><td>" + esc(name) + "</td><td>" + esc(money(book.cash_micro)) + "</td><td>" + esc(money(book.realized_micro)) +
+    const seen = book.seen ? " · " + esc(book.seen) : "";
+    let pending = "";
+    if (book.pending_client_id) {
+      const side = book.pending_side ? " " + esc(book.pending_side) : "";
+      const sym = book.pending_symbol ? " " + esc(book.pending_symbol) : "";
+      pending = " · заявка" + side + sym + " не закрыта";
+    }
+    html += "<tr><td>" + esc(name) + seen + pending + (book.pause ? " · " + esc(book.pause) : "") + (book.locks ? " · " + esc(book.locks) : "") + "</td><td>" + esc(money(book.cash_micro)) + "</td><td>" + esc(money(book.realized_micro)) +
       "</td><td>" + esc(money(book.fees_micro)) + "</td><td>" + pos + "</td></tr>";
   }
   return html + "</tbody>";
@@ -462,11 +661,14 @@ function renderQuotes(quotes) {
 }
 function renderEvents(events) {
   if (!events.length) return "<tbody><tr><td>сделок нет</td></tr></tbody>";
-  let html = "<thead><tr><th>когда</th><th>книга</th><th>что</th><th>пара</th><th>цена</th><th>зачислено</th><th>причина</th></tr></thead><tbody>";
+  let html = "<thead><tr><th>когда</th><th>книга</th><th>что</th><th>пара</th><th>цена</th><th>зачислено</th><th>комиссия</th><th>причина</th></tr></thead><tbody>";
   for (const ev of events.slice().reverse()) {
     if (!ev || typeof ev !== "object") continue;
+    const landed = ev.credit != null ? ev.credit : (ev.debit != null ? "−" + ev.debit : "—");
+    const size = ev.size ? " " + esc(ev.size) : "";
     html += "<tr><td>" + esc(ev.at) + "</td><td>" + esc(ev.book) + "</td><td>" + esc(ev.kind) +
-      "</td><td>" + esc(ev.symbol) + "</td><td>" + esc(ev.price) + "</td><td>" + esc(ev.credit == null ? "—" : ev.credit) +
+      "</td><td>" + esc(ev.symbol) + size + "</td><td>" + esc(ev.price) + "</td><td>" + esc(landed) +
+      "</td><td>" + esc(ev.fee == null ? "—" : ev.fee) +
       "</td><td>" + esc(ev.reason) + (ev.left === true ? " · остаток на книге" : "") + "</td></tr>";
   }
   return html + "</tbody>";

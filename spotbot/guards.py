@@ -25,6 +25,7 @@ def marked_equity(
     With taker rates, the coin is the bid after the sell fee. A missing mark
     or a missing rate refuses the number. Without rates the mark is the gross bid.
     A coin below the lot step adds nothing: it cannot be sold.
+    A coin the bot will not sell refuses the whole number. It is not cash and it is not zero.
     """
     if isinstance(cash_micro, bool) or not isinstance(cash_micro, int) or cash_micro <= -10**24 or cash_micro >= 10**24:
         return None
@@ -38,6 +39,12 @@ def marked_equity(
     for pos in positions:
         if getattr(pos, "below_lot", False) is True:
             continue
+        if (
+            getattr(pos, "asset_ok", True) is False
+            or getattr(pos, "free_ok", True) is False
+            or getattr(pos, "balance_ok", True) is False
+        ):
+            return None
         price = marks.get(pos.symbol, 0)
         if isinstance(price, bool) or isinstance(pos.base_atoms, bool) or not isinstance(price, int) or not isinstance(pos.base_atoms, int) or price <= 0 or pos.base_atoms <= 0:
             return None
