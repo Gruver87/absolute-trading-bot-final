@@ -30,6 +30,8 @@ copy .env.example .env
 | `python -m spotbot --sleeves --once` | Три рукава, у каждого своя книга |
 | `python -m spotbot.ops_main` | Только страница наблюдения |
 | `python -m spotbot.replay_main --symbol BTCUSDT` | Прогон правила по свечам, без ордеров |
+| `python scripts/unseen_gate.py` | Готовность невиденной ленты (гейта); без `--run` свечи не гоняет |
+| `python scripts/unseen_gate.py --run` | Два окна гейта через `replay_main`; входы не включает |
 | `python -m pytest tests/test_logic.py -q` | Проверка правил. Корень проекта на пути импорта |
 
 Ключи MEXC в исходниках не лежат. Токен Telegram процесс не загружает. Публичные свечи работают без ключей.
