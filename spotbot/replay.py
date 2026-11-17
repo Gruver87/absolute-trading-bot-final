@@ -14,8 +14,12 @@ from spotbot.rules import budget_micro, plan_paper_buy
 from spotbot.sanity import follows_close, mark_ok, price_ok, slip_price
 from spotbot.kucoin import KLINE_LIMIT
 from spotbot.liquidity import candle_lift, prior_bar_pays, range_pays
+from spotbot.research_atr import atr_stop_bps, research_atr_mult
 from spotbot.research_entry import research_entry, research_entry_from_bars, research_fill_ok, research_mode
 from spotbot.signals import entry_signal, mean_pays, reclaim_still, rise_pays
+
+# Default signal bar length (5m). Higher-TF research passes bar_ms explicitly.
+DEFAULT_BAR_MS = 300_000
 
 
 @dataclass(frozen=True)
@@ -77,10 +81,12 @@ def replay_closes(
     highs: list[int] | None = None,
     lows: list[int] | None = None,
     volumes: list[int] | None = None,
+    bar_ms: int = DEFAULT_BAR_MS,
 ) -> ReplayResult:
     research = research_mode()
-    need_highs = research in ("breakout", "breakout_10", "vol_climax_fade")
-    need_lows = research == "vol_climax_fade"
+    atr_mult = research_atr_mult()
+    need_highs = research in ("breakout", "breakout_10", "vol_climax_fade") or atr_mult is not None
+    need_lows = research == "vol_climax_fade" or atr_mult is not None
     need_vol = research in ("breakout", "breakout_10", "confluence", "vol_climax_fade")
     if (
         not closes
@@ -95,6 +101,9 @@ def replay_closes(
         or isinstance(lock_count, bool)
         or not isinstance(lock_count, int)
         or lock_count < 2
+        or isinstance(bar_ms, bool)
+        or not isinstance(bar_ms, int)
+        or bar_ms < 60_000
         or (opens is not None and (not isinstance(opens, list) or len(opens) != len(closes)))
         or (minute_closes is None) != (bar_open_ms is None)
         or (bar_open_ms is not None and (not isinstance(bar_open_ms, list) or len(bar_open_ms) != len(closes)))
@@ -103,6 +112,8 @@ def replay_closes(
     if require_prior and (highs is None or lows is None or len(highs) != len(closes) or len(lows) != len(closes)):
         return ReplayResult(0, 0, 0, 0, True, (), open_known=False)
     if research and need_highs and (highs is None or len(highs) != len(closes)):
+        return ReplayResult(0, 0, 0, 0, True, (), open_known=False)
+    if atr_mult is not None and (highs is None or lows is None or len(highs) != len(closes) or len(lows) != len(closes)):
         return ReplayResult(0, 0, 0, 0, True, (), open_known=False)
     if research and need_lows and (lows is None or len(lows) != len(closes)):
         return ReplayResult(0, 0, 0, 0, True, (), open_known=False)
@@ -116,6 +127,7 @@ def replay_closes(
     clean_times: list[int] = []
     kept_at: list[int] = []
     keep_vol = need_vol
+    keep_hl = require_prior or need_highs or need_lows or atr_mult is not None
     for index, price in enumerate(closes):
         if not _usable(price):
             continue
@@ -125,9 +137,9 @@ def replay_closes(
         kept_at.append(index)
         if clean_opens is not None and opens is not None:
             clean_opens.append(opens[index])
-        if (require_prior or need_highs) and highs is not None:
+        if keep_hl and highs is not None:
             clean_highs.append(highs[index])
-        if (require_prior or need_lows) and lows is not None:
+        if keep_hl and lows is not None:
             clean_lows.append(lows[index])
         if keep_vol and volumes is not None:
             clean_vols.append(volumes[index])
@@ -137,7 +149,7 @@ def replay_closes(
         return ReplayResult(0, 0, 0, 0, False, ())
     closes = clean
     opens = clean_opens
-    buckets = _minute_buckets(minute_closes, clean_times) if minute_closes is not None else None
+    buckets = _minute_buckets(minute_closes, clean_times, span=bar_ms) if minute_closes is not None else None
     if minute_closes is not None and (buckets is None or len(buckets) != len(closes) or any(not bucket for bucket in buckets)):
         return ReplayResult(0, 0, 0, 0, True, (), open_known=False)
     cash = cash_micro
@@ -150,6 +162,7 @@ def replay_closes(
     peak = 0
     base = 0
     spent = 0
+    pos_stop = stop_bps
     start = 40
     i = start
     stamps: list[int] = []
@@ -201,7 +214,7 @@ def replay_closes(
             if require_prior and (
                 i < 1
                 or kept_at[i] != kept_at[i - 1] + 1
-                or (clean_times and clean_times[i] - clean_times[i - 1] != 300_000)
+                or (clean_times and clean_times[i] - clean_times[i - 1] != bar_ms)
                 or not prior_bar_pays(clean_highs[i - 1], clean_lows[i - 1], slip_bps, taker_bps)
             ):
                 i += 1
@@ -222,11 +235,26 @@ def replay_closes(
             peak = paid
             base = bought
             spent = debit
+            pos_stop = stop_bps
+            if atr_mult is not None and clean_highs and clean_lows:
+                hi_win = _signal_closes(clean_highs, i)
+                lo_win = _signal_closes(clean_lows, i)
+                sized = atr_stop_bps(hi_win, lo_win, window, paid, atr_mult)
+                if sized is None:
+                    # Cannot size stop — refuse this entry.
+                    cash += debit
+                    fees -= fee
+                    entry = 0
+                    base = 0
+                    spent = 0
+                    i += 1
+                    continue
+                pos_stop = sized
             i += 1
             continue
         raws = buckets[i] if buckets is not None else [closes[i]]
         reason, sold, peak = _walk_exit(
-            entry, peak, raws, slip_bps, stop_bps, take_bps, trail_arm_bps, trail_gap_bps
+            entry, peak, raws, slip_bps, pos_stop, take_bps, trail_arm_bps, trail_gap_bps
         )
         if reason is None:
             i += 1
@@ -281,11 +309,13 @@ def replay_lift_bars(
     bar_open_ms: list[int] | None = None,
     require_range: bool = False,
     require_prior: bool = False,
+    bar_ms: int = DEFAULT_BAR_MS,
 ) -> ReplayResult:
     """Candle half of the liquidity rule. Bid/ask and the oracle are not in the tape.
 
     Each bar is high, low, close, quote volume. A jumped close stays in the tape.
     """
+    atr_mult = research_atr_mult()
     if (
         not bars
         or bars[0][2] <= 0
@@ -299,6 +329,9 @@ def replay_lift_bars(
         or isinstance(lock_count, bool)
         or not isinstance(lock_count, int)
         or lock_count < 2
+        or isinstance(bar_ms, bool)
+        or not isinstance(bar_ms, int)
+        or bar_ms < 60_000
         or (opens is not None and (not isinstance(opens, list) or len(opens) != len(bars)))
         or (minute_closes is None) != (bar_open_ms is None)
         or (bar_open_ms is not None and (not isinstance(bar_open_ms, list) or len(bar_open_ms) != len(bars)))
@@ -323,7 +356,7 @@ def replay_lift_bars(
         return ReplayResult(0, 0, 0, 0, False, ())
     bars = clean
     opens = clean_opens
-    buckets = _minute_buckets(minute_closes, clean_times) if minute_closes is not None else None
+    buckets = _minute_buckets(minute_closes, clean_times, span=bar_ms) if minute_closes is not None else None
     if minute_closes is not None and (buckets is None or len(buckets) != len(bars) or any(not bucket for bucket in buckets)):
         return ReplayResult(0, 0, 0, 0, True, (), open_known=False)
     cash = cash_micro
@@ -336,6 +369,7 @@ def replay_lift_bars(
     peak = 0
     base = 0
     spent = 0
+    pos_stop = stop_bps
     i = 14
     stamps: list[int] = []
     cooldown_until = 0
@@ -372,7 +406,7 @@ def replay_lift_bars(
             if require_prior and (
                 i < 1
                 or kept_at[i] != kept_at[i - 1] + 1
-                or (clean_times and clean_times[i] - clean_times[i - 1] != 300_000)
+                or (clean_times and clean_times[i] - clean_times[i - 1] != bar_ms)
                 or not prior_bar_pays(bars[i - 1][0], bars[i - 1][1], slip_bps, taker_bps)
             ):
                 i += 1
@@ -393,11 +427,26 @@ def replay_lift_bars(
             peak = paid
             base = bought
             spent = debit
+            pos_stop = stop_bps
+            if atr_mult is not None:
+                closes_win = [bar[2] for bar in window]
+                highs_win = [bar[0] for bar in window]
+                lows_win = [bar[1] for bar in window]
+                sized = atr_stop_bps(highs_win, lows_win, closes_win, paid, atr_mult)
+                if sized is None:
+                    cash += debit
+                    fees -= fee
+                    entry = 0
+                    base = 0
+                    spent = 0
+                    i += 1
+                    continue
+                pos_stop = sized
             i += 1
             continue
         raws = buckets[i] if buckets is not None else [bars[i][2]]
         reason, sold, peak = _walk_exit(
-            entry, peak, raws, slip_bps, stop_bps, take_bps, trail_arm_bps, trail_gap_bps
+            entry, peak, raws, slip_bps, pos_stop, take_bps, trail_arm_bps, trail_gap_bps
         )
         if reason is None:
             i += 1

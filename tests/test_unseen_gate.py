@@ -14,6 +14,7 @@ from unseen_gate import (  # noqa: E402
     UNSEEN_AFTER_MS,
     BAR_MS,
     eight_strictly_positive,
+    limit_for_interval,
     parse_pooled_medians,
     plan_windows,
 )
@@ -81,3 +82,19 @@ def test_unseen_after_is_oct_15_utc():
     dt = datetime.fromtimestamp(UNSEEN_AFTER_MS / 1000, tz=timezone.utc)
     assert dt.year == 2026 and dt.month == 10 and dt.day == 15
     assert dt.hour == 0 and dt.minute == 0
+
+
+def test_higher_tf_limits_map_calendar():
+    # 1000×5m = 5000min → 15m ceil 334; 1h ceil 84 → floored to 160 for split.
+    assert limit_for_interval("5m") == 1000
+    assert limit_for_interval("15m") == 334
+    assert limit_for_interval("1h") == 160
+
+
+def test_plan_windows_15m_ready_shape():
+    now = UNSEEN_AFTER_MS + 3 * 334 * 900_000
+    plan = plan_windows(now, "15m")
+    assert plan.ready is True
+    assert plan.limit == 334
+    assert plan.bar_ms == 900_000
+    assert plan.late_end_ms == now - 334 * 900_000

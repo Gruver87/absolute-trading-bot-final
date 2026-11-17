@@ -11,21 +11,42 @@ import sys
 import time
 
 from spotbot.kucoin import KucoinClient, KucoinError, KucoinRateLimit
+from spotbot.research_atr import research_atr_mult
 from spotbot.research_entry import research_mode
 from spotbot.rules import RuleError
 from spotbot.money import format_price, format_usdt, parse_micro
-from spotbot.replay import ReplayResult, hold_net, holdout_cut, median_micro, replay_closes, replay_lift_bars
+from spotbot.replay import (
+    DEFAULT_BAR_MS,
+    ReplayResult,
+    hold_net,
+    holdout_cut,
+    median_micro,
+    replay_closes,
+    replay_lift_bars,
+)
 from spotbot.sanity import tick_fits
 from spotbot.sleeves import sleeve_symbols
 
 # Same cap the live buy already refuses. The tape has no historical spread.
 SPREAD_SLIP_BPS = 30
 
+_INTERVAL_MS = {
+    "5m": 300_000,
+    "15m": 900_000,
+    "1h": 3_600_000,
+}
+
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Replay RSI exits on KuCoin 5m candles")
+    parser = argparse.ArgumentParser(description="Replay RSI exits on KuCoin candles")
     parser.add_argument("--symbol", default="BTCUSDT")
     parser.add_argument("--limit", type=int, default=500)
+    parser.add_argument(
+        "--interval",
+        default="5m",
+        choices=sorted(_INTERVAL_MS),
+        help="kline interval (research higher-TF gate uses 15m/1h)",
+    )
     parser.add_argument("--sleeves", action="store_true", help="replay the fixed 14 pairs and print the median")
     parser.add_argument("--end-ms", type=int, default=0, help="replay candles that closed at or before this time")
     parser.add_argument("--mean-pays", action="store_true", help="buy a reclaim only when the 20-bar mean clears the round trip")
@@ -45,13 +66,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.prior_pays and (args.rise_pays or args.mean_pays or args.range_pays):
         print("prior-pays is its own entry filter", file=sys.stderr)
         return 2
+    bar_ms = _INTERVAL_MS[args.interval]
     if args.rise_pays:
         print("entry=rise: the reclaim is not used")
     if args.prior_pays:
         print("entry=prior: the last closed bar must clear the round trip")
+    print(f"interval={args.interval} bar_ms={bar_ms}")
     _research = research_mode()
     if _research:
         print(f"research_entry={_research} (replay only; SPOT_ENTRIES untouched)")
+    _atr = research_atr_mult()
+    if _atr is not None:
+        print(f"research_atr_mult={_atr} (replay only; SPOT_ENTRIES untouched)")
     symbols = list(sleeve_symbols()) if args.sleeves else [args.symbol.upper()]
     later_rsi: list[tuple[str, int]] = []
     later_lift: list[tuple[str, int]] = []
@@ -62,7 +88,7 @@ def main(argv: list[str] | None = None) -> int:
     client = KucoinClient()
     if args.end_ms:
         try:
-            latest_open = client.server_time_ms() - args.limit * 300_000
+            latest_open = client.server_time_ms() - args.limit * bar_ms
         except KucoinRateLimit as exc:
             print(f"replay stopped on rate limit: {exc}", file=sys.stderr)
             return 1
@@ -74,7 +100,7 @@ def main(argv: list[str] | None = None) -> int:
             return 2
     for index, symbol in enumerate(symbols):
         if index:
-            time.sleep(0.2)
+            time.sleep(0.35 if args.interval != "5m" else 0.2)
         try:
             rule = client.symbol_rule(symbol)
             if not rule.tradable or rule.base_step_atoms <= 0:
@@ -86,14 +112,14 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"{symbol}: {reason}; left out of the median")
                 continue
             if args.end_ms:
-                stamped = client.ohlcv_stamped_until(symbol, "5m", args.limit, args.end_ms)
+                stamped = client.ohlcv_stamped_until(symbol, args.interval, args.limit, args.end_ms)
             else:
-                stamped = client.ohlcv_stamped(symbol, "5m", args.limit)
+                stamped = client.ohlcv_stamped(symbol, args.interval, args.limit)
             if len(stamped) >= 2:
                 stamped = stamped[:-1]
             if len(stamped) < 2:
                 raise KucoinError(f"no klines for {symbol}")
-            minutes = client.klines_between(symbol, "1m", stamped[0][0], stamped[-1][0] + 300_000)
+            minutes = client.klines_between(symbol, "1m", stamped[0][0], stamped[-1][0] + bar_ms)
         except KucoinRateLimit as exc:
             print(f"replay stopped on rate limit: {exc}", file=sys.stderr)
             print("median refused: the tape is incomplete")
@@ -134,6 +160,7 @@ def main(argv: list[str] | None = None) -> int:
                 require_range=args.range_pays,
                 require_rise=args.rise_pays,
                 require_prior=args.prior_pays,
+                bar_ms=bar_ms,
             )
             rsi_net, lift_net = _run_pair(
                 "later",
@@ -152,6 +179,7 @@ def main(argv: list[str] | None = None) -> int:
                 require_range=args.range_pays,
                 require_rise=args.rise_pays,
                 require_prior=args.prior_pays,
+                bar_ms=bar_ms,
             )
             if e_rsi is not None:
                 earlier_rsi.append((symbol, e_rsi))
@@ -178,6 +206,7 @@ def main(argv: list[str] | None = None) -> int:
                 require_range=args.range_pays,
                 require_rise=args.rise_pays,
                 require_prior=args.prior_pays,
+                bar_ms=bar_ms,
             )
     if args.sleeves:
         _print_median("earlier rsi", [net for _symbol, net in earlier_rsi])
@@ -221,6 +250,7 @@ def _run_pair(
     require_range: bool = False,
     require_rise: bool = False,
     require_prior: bool = False,
+    bar_ms: int = DEFAULT_BAR_MS,
 ) -> tuple[int | None, int | None]:
     cash = parse_micro("1000")
     floor = parse_micro("3")
@@ -255,6 +285,7 @@ def _run_pair(
         highs=[bar[0] for bar in bars],
         lows=[bar[1] for bar in bars],
         volumes=[bar[3] for bar in bars],
+        bar_ms=bar_ms,
         )
         _print_result(f"rsi:{label}", symbol, len(traded), result, taker_bps)
         _print_hold(label, symbol, traded, result, taker_bps, base_step_atoms, floor)
@@ -284,6 +315,7 @@ def _run_pair(
         bar_open_ms=bar_open_ms,
         require_range=require_range,
         require_prior=require_prior,
+        bar_ms=bar_ms,
         )
         _print_result(f"lift-candles:{label}", symbol, len(traded_bars), lift, taker_bps)
         if median:
