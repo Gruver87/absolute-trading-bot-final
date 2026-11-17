@@ -30,9 +30,10 @@ copy .env.example .env
 | `python -m spotbot --sleeves --once` | Три рукава, у каждого своя книга |
 | `python -m spotbot.ops_main` | Только страница наблюдения |
 | `python -m spotbot.replay_main --symbol BTCUSDT` | Прогон правила по свечам, без ордеров |
-| `python scripts/unseen_gate.py` | Готовность невиденной ленты (гейта); без `--run` свечи не гоняет |
-| `python scripts/unseen_gate.py --run` | Два окна гейта через `replay_main`; входы не включает |
-| `python -m pytest tests/test_logic.py -q` | Проверка правил. Корень проекта на пути импорта |
+| `python scripts/unseen_gate.py` | Готовность невиденной ленты (гейта); без `--run` свечи не гоняет; пишет строку в `data/gate_history.jsonl` |
+| `python scripts/unseen_gate.py --run` | Два окна гейта через `replay_main`; входы не включает; журналирует восемь медиан |
+| `python scripts/kucoin_keyed_smoke.py` | Ключи: публичные часы + `GET /accounts`; ордера не ставит; при `SPOT_LIVE=1` отказывает |
+| `python -m pytest tests/ -q` | Проверка правил. Корень проекта на пути импорта |
 
 Ключи KuCoin в исходниках не лежат. Токен Telegram процесс не загружает. Публичные свечи работают без ключей.
 
@@ -66,6 +67,7 @@ copy .env.example .env
 | `SPOT_INTERVAL_SEC` | 60 | Пауза между циклами |
 | `SPOT_LIVE` | 0 | Живые ордера только вместе с `--live` и значением `1` |
 | `SPOT_ENTRIES` | 0 | Не включает входы. Знак на соседних окнах не держится |
+| `SPOT_KILL` | 0 | `1` или файл `data/STOP` — пауза новых покупок; выходы идут |
 | `SPOT_TAKER_BPS` | 5 | Запасная комиссия, если у пары своей ещё нет |
 | `SPOT_DAILY_LOSS_BPS` | 500 | Дневной предел убытка, 5% |
 | `SPOT_DRAWDOWN_BPS` | 1000 | Просадка от пика кассы, 10% |

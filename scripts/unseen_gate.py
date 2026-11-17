@@ -7,6 +7,9 @@ is run via ``python -m spotbot.replay_main --sleeves --prior-pays`` (unchanged).
 
 Default: readiness check only (no heavy replay). Pass ``--run`` when ready.
 Never flips SPOT_ENTRIES / live buys.
+
+Each invocation appends one line to ``data/gate_history.jsonl`` (tip SHA,
+timestamp, readiness or eight medians). Use ``--no-journal`` to skip.
 """
 
 from __future__ import annotations
@@ -20,6 +23,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from spotbot.gate_journal import (  # noqa: E402
+    append_record,
+    build_record,
+    default_journal_path,
+    tip_sha,
+)
 BAR_MS = 300_000
 LIMIT = 1000
 # Candles must be entirely after this calendar day (open >= 2026-10-15 00:00 UTC).
@@ -131,6 +141,35 @@ def _run_replay(end_ms: int) -> tuple[int, str]:
     return int(proc.returncode), out
 
 
+def _journal(
+    enabled: bool,
+    *,
+    kind: str,
+    result: str,
+    ready: bool | None = None,
+    now_ms: int | None = None,
+    early: dict[str, float] | None = None,
+    late: dict[str, float] | None = None,
+) -> None:
+    if not enabled:
+        return
+    try:
+        record = build_record(
+            kind=kind,
+            result=result,
+            tip=tip_sha(ROOT),
+            early=early,
+            late=late,
+            ready=ready,
+            now_ms=now_ms,
+        )
+        path = default_journal_path(ROOT)
+        append_record(path, record)
+        print(f"gate journal: appended {path}")
+    except (OSError, ValueError, TypeError) as exc:
+        print(f"gate journal write failed: {exc}", file=sys.stderr)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Unseen-tape gate (read-only). Does not enable entries."
@@ -146,12 +185,17 @@ def main(argv: list[str] | None = None) -> int:
         default=0,
         help="override server time (tests); 0 = ask KuCoin public clock",
     )
+    parser.add_argument(
+        "--no-journal",
+        action="store_true",
+        help="do not append data/gate_history.jsonl",
+    )
     args = parser.parse_args(argv)
+    journal_on = not bool(args.no_journal)
 
     now_ms = int(args.now_ms) if args.now_ms else 0
     if now_ms <= 0:
-        # Local import so --help and unit tests of plan_windows need no network.
-        sys.path.insert(0, str(ROOT))
+        # Local import so unit tests of plan_windows need no network.
         from spotbot.kucoin import KucoinClient, KucoinError, KucoinRateLimit
 
         try:
@@ -164,10 +208,24 @@ def main(argv: list[str] | None = None) -> int:
     _print_plan(plan)
     if not plan.ready:
         print("GATE: NOT_READY (entries stay off; bot code untouched)")
+        _journal(
+            journal_on,
+            kind="readiness",
+            result="NOT_READY",
+            ready=False,
+            now_ms=plan.now_ms,
+        )
         return 2
 
     if not args.run:
         print("GATE: READY (pass --run to execute both windows; entries stay off)")
+        _journal(
+            journal_on,
+            kind="readiness",
+            result="READY",
+            ready=True,
+            now_ms=plan.now_ms,
+        )
         return 0
 
     print("--- window early ---")
@@ -175,6 +233,13 @@ def main(argv: list[str] | None = None) -> int:
     print(out_e.rstrip())
     if code_e != 0:
         print(f"GATE: FAIL (early window replay exit {code_e})", file=sys.stderr)
+        _journal(
+            journal_on,
+            kind="run",
+            result="FAIL",
+            ready=True,
+            now_ms=plan.now_ms,
+        )
         return 1
     early = parse_pooled_medians(out_e)
     print("--- window late ---")
@@ -182,6 +247,14 @@ def main(argv: list[str] | None = None) -> int:
     print(out_l.rstrip())
     if code_l != 0:
         print(f"GATE: FAIL (late window replay exit {code_l})", file=sys.stderr)
+        _journal(
+            journal_on,
+            kind="run",
+            result="FAIL",
+            ready=True,
+            now_ms=plan.now_ms,
+            early=early,
+        )
         return 1
     late = parse_pooled_medians(out_l)
 
@@ -196,6 +269,15 @@ def main(argv: list[str] | None = None) -> int:
 
     if missing:
         print("GATE: FAIL (missing pooled median line; entries stay off)")
+        _journal(
+            journal_on,
+            kind="run",
+            result="FAIL",
+            ready=True,
+            now_ms=plan.now_ms,
+            early=early,
+            late=late,
+        )
         return 1
 
     if eight_strictly_positive(early, late):
@@ -203,9 +285,27 @@ def main(argv: list[str] | None = None) -> int:
             "GATE: PASS (all eight medians > 0). "
             "Paper entries still require an explicit operator step; this script does not enable them."
         )
+        _journal(
+            journal_on,
+            kind="run",
+            result="PASS",
+            ready=True,
+            now_ms=plan.now_ms,
+            early=early,
+            late=late,
+        )
         return 0
 
     print("GATE: FAIL (not all eight medians strictly > 0; entries stay off)")
+    _journal(
+        journal_on,
+        kind="run",
+        result="FAIL",
+        ready=True,
+        now_ms=plan.now_ms,
+        early=early,
+        late=late,
+    )
     return 1
 
 

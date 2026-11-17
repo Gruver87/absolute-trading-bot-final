@@ -11,6 +11,7 @@ from pathlib import Path
 from spotbot.config import Config, require_cycle_config
 from spotbot.guards import drawdown_blocks, marked_equity, note_pair_stop, pair_locked, spread_blocks, top_spread_bps
 from spotbot.journal import note_event, note_heartbeat, note_quote, ops_root
+from spotbot.killswitch import kill_switch_active, kill_switch_reason
 from spotbot.exits import exit_reason, pnl_bps
 from spotbot.fees import paper_sell
 from spotbot.rules import budget_micro, cap_spend, plan_paper_buy, round_base_atoms, round_quote_micro, uses_slot
@@ -144,12 +145,25 @@ def run_cycle(
             LOG.warning("stop cooldown book=%s until=%s", name, shown_until)
         if not orders_allowed:
             LOG.warning("live orders paused book=%s", name)
+        root = ops_root(path)
+        killed = kill_switch_active(root)
+        if killed:
+            LOG.warning("kill switch book=%s: %s", name, kill_switch_reason(root) or "active")
         if not cfg.entries:
             LOG.warning(
                 "entries off book=%s: the sign does not hold across windows",
                 name,
             )
-        if halt or conflict or pending_problem or cooled or other_pending or not orders_allowed or not cfg.entries:
+        if (
+            halt
+            or conflict
+            or pending_problem
+            or cooled
+            or other_pending
+            or not orders_allowed
+            or not cfg.entries
+            or killed
+        ):
             entries, skipped = 0, 0
         else:
             deadline = time.monotonic() + CYCLE_BUDGET_SEC
@@ -900,6 +914,9 @@ def _try_buy(
     """Buy one symbol. A live order already in flight blocks every other buy."""
     if not cfg.entries:
         LOG.info("skip %s: entries are off", symbol)
+        return False
+    if kill_switch_active(ops_root(path)):
+        LOG.info("skip %s: kill switch active", symbol)
         return False
     if book.pending_client_id:
         LOG.warning("pending %s blocks %s", book.pending_symbol, symbol)
