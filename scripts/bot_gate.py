@@ -33,6 +33,7 @@ def main() -> int:
     need(ROOT / "docs" / "AGENT_SKILLS.md", "bot-holdout-wait", "agent_skills_bot_freeze")
     need(ROOT / "docs" / "AGENT_SKILLS.md", "SPOT_ENTRIES", "agent_skills_entries_off")
     need(ROOT / "scripts" / "link_agent_skills.ps1", "link_agent_skills", "link_script")
+    need(ROOT / "scripts" / "test_all.ps1", "bot_gate", "test_all_script")
     need(ROOT / "README.md", "PROTOCOL_STATUS", "readme_protocol")
     need(ROOT / "README.md", "AGENT_SKILLS", "readme_agent_skills")
     need(ROOT / "README.md", "SPOT_ENTRIES", "readme_entries")

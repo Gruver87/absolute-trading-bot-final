@@ -28,6 +28,7 @@ In-tree truth: [`PROTOCOL_STATUS.md`](PROTOCOL_STATUS.md). Historical v1 windows
 
 ```powershell
 python scripts\bot_gate.py
+.\scripts\test_all.ps1   # bot_gate + pytest (no live / no SPOT_ENTRIES)
 ```
 
-CI runs the same gate. Exit 0 only when PROTOCOL_STATUS / AGENT_SKILLS needles stay present — not an edge claim.
+CI runs `bot_gate`. Exit 0 only when PROTOCOL_STATUS / AGENT_SKILLS needles stay present — not an edge claim.
