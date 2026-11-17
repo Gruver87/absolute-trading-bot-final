@@ -11,3 +11,5 @@
 - KuCoin client, CI, kill switch, and gate journal remain the maintained base.
 
 Until an accepted v2 is written into the repo by an explicit operator decision, treat this stub as the in-tree status pointer only.
+
+Cursor Agent Skills companion: [`AGENT_SKILLS.md`](AGENT_SKILLS.md) ([`dup-agent-skills`](https://github.com/Gruver87/dup-agent-skills) · skill `bot-holdout-wait`).

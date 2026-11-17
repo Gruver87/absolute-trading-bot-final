@@ -33,6 +33,9 @@ Thumbs.db
 *.tmp
 *.bak
 
+# Cursor Agent Skills mirror (from dup-agent-skills)
+.agents/
+
 # Спот-бот: локальный счёт и сборка Rust
 data/
 .venv/

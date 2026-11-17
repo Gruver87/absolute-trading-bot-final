@@ -54,6 +54,7 @@ copy .env.example .env
 | [docs/BOOK.md](docs/BOOK.md) | Книги, живая заявка, лимит биржи, страница наблюдения |
 | [docs/MEASUREMENT.md](docs/MEASUREMENT.md) | Исторические окна v1 и как считается прогон |
 | [docs/REFUSALS.md](docs/REFUSALS.md) | Что процесс отвергает до того, как двигать кассу |
+| [docs/AGENT_SKILLS.md](docs/AGENT_SKILLS.md) | Cursor skills (стоп v1 / без silent retune) · `.\scripts\link_agent_skills.ps1` |
 
 ## Переменные
 
