@@ -111,15 +111,25 @@ def main(argv: list[str] | None = None) -> int:
                 left_out.append(symbol)
                 print(f"{symbol}: {reason}; left out of the median")
                 continue
+            # Fetch one extra so dropping the still-open tip still leaves --limit bars
+            # (needed for 1h where limit is already at the holdout_cut floor of 160).
+            fetch_limit = min(1000, args.limit + 1)
             if args.end_ms:
-                stamped = client.ohlcv_stamped_until(symbol, args.interval, args.limit, args.end_ms)
+                stamped = client.ohlcv_stamped_until(symbol, args.interval, fetch_limit, args.end_ms)
             else:
-                stamped = client.ohlcv_stamped(symbol, args.interval, args.limit)
+                stamped = client.ohlcv_stamped(symbol, args.interval, fetch_limit)
             if len(stamped) >= 2:
                 stamped = stamped[:-1]
+            if len(stamped) > args.limit:
+                stamped = stamped[-args.limit :]
             if len(stamped) < 2:
                 raise KucoinError(f"no klines for {symbol}")
-            minutes = client.klines_between(symbol, "1m", stamped[0][0], stamped[-1][0] + bar_ms)
+            # 1m marks over a 160×1h window exceed klines_between's 6000-bar cap
+            # (9600 minutes). Use 5m exit marks inside each 1h bar instead.
+            mark_interval = "5m" if args.interval == "1h" else "1m"
+            minutes = client.klines_between(
+                symbol, mark_interval, stamped[0][0], stamped[-1][0] + bar_ms
+            )
         except KucoinRateLimit as exc:
             print(f"replay stopped on rate limit: {exc}", file=sys.stderr)
             print("median refused: the tape is incomplete")

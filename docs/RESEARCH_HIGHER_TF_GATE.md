@@ -16,6 +16,8 @@ Frozen MEASUREMENT window = **1000 × 5m** = **5000 minutes** calendar.
 
 Tip holdout = one window of the same bar count. Unseen cut unchanged (`open ≥ 2026-10-15`).
 
+**Exit marks:** 5m/15m still walk exits on **1m** closes (MEASUREMENT fidelity). **1h** uses **5m** closes inside each hour — a 160×1h window is 9600 minutes of 1m tape, above `klines_between`'s 6000-bar cap; 5m marks stay under the cap while remaining finer than the signal bar.
+
 ```bash
 python3 scripts/unseen_gate.py --interval 15m
 RESEARCH_ENTRY=bb_mr python3 scripts/unseen_gate.py --interval 15m --run
