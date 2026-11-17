@@ -11,6 +11,8 @@ import sys
 import time
 
 from spotbot.kucoin import KucoinClient, KucoinError, KucoinRateLimit
+from spotbot.research_atr import research_trail_atr_mult
+from spotbot.research_entry import research_mode
 from spotbot.rules import RuleError
 from spotbot.money import format_price, format_usdt, parse_micro
 from spotbot.replay import ReplayResult, hold_net, holdout_cut, median_micro, replay_closes, replay_lift_bars
@@ -48,6 +50,12 @@ def main(argv: list[str] | None = None) -> int:
         print("entry=rise: the reclaim is not used")
     if args.prior_pays:
         print("entry=prior: the last closed bar must clear the round trip")
+    _research = research_mode()
+    _trail = research_trail_atr_mult()
+    if _research:
+        print(f"research_entry={_research} (replay only; SPOT_ENTRIES untouched)")
+    if _trail is not None:
+        print(f"research_trail_atr_mult={_trail} (take disabled; stop=trail gap)")
     symbols = list(sleeve_symbols()) if args.sleeves else [args.symbol.upper()]
     later_rsi: list[tuple[str, int]] = []
     later_lift: list[tuple[str, int]] = []
@@ -222,8 +230,11 @@ def _run_pair(
     floor = parse_micro("3")
     traded = closes[entry_from:]
     traded_bars = bars[entry_from:]
+    trail_on = research_trail_atr_mult() is not None
+    rsi_stop_grid = 2000 if trail_on else 350
+    lift_stop_grid = 2000 if trail_on else 150
     rsi_net: int | None = None
-    if _grid_ok(traded, price_tick, 350):
+    if _grid_ok(traded, price_tick, rsi_stop_grid):
         result = replay_closes(
         closes,
         cash_micro=cash,
@@ -250,6 +261,7 @@ def _run_pair(
         require_prior=require_prior,
         highs=[bar[0] for bar in bars],
         lows=[bar[1] for bar in bars],
+        volumes=[bar[3] for bar in bars],
         )
         _print_result(f"rsi:{label}", symbol, len(traded), result, taker_bps)
         _print_hold(label, symbol, traded, result, taker_bps, base_step_atoms, floor)
@@ -258,9 +270,9 @@ def _run_pair(
             if rsi_net is None:
                 print(f"rsi:{label} symbol={symbol} left out: the minute tape does not cover the bar")
     else:
-        print(f"rsi:{label} symbol={symbol} refused: price step is wider than the 350 bps stop")
+        print(f"rsi:{label} symbol={symbol} refused: price step is wider than the {rsi_stop_grid} bps stop")
     lift_net: int | None = None
-    if _grid_ok([bar[2] for bar in traded_bars], price_tick, 150):
+    if _grid_ok([bar[2] for bar in traded_bars], price_tick, lift_stop_grid):
         lift = replay_lift_bars(
         bars,
         cash_micro=cash,
@@ -286,7 +298,7 @@ def _run_pair(
             if lift_net is None:
                 print(f"lift-candles:{label} symbol={symbol} left out: the minute tape does not cover the bar")
     else:
-        print(f"lift-candles:{label} symbol={symbol} refused: price step is wider than the 150 bps stop")
+        print(f"lift-candles:{label} symbol={symbol} refused: price step is wider than the {lift_stop_grid} bps stop")
     return rsi_net, lift_net
 
 

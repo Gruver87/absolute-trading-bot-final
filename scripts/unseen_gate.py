@@ -1,23 +1,26 @@
 #!/usr/bin/env python3
-"""Unseen-tape gate helper (MEASUREMENT.md). Read-only: does not trade or change rules.
+"""Unseen-tape gate helper (MEASUREMENT_v2 on research/trend-following).
 
-Computes two adjacent 1000-bar 5m windows entirely after 2026-10-14, with the
-late window ending before the tip holdout of the latest 1000 bars. Each window
-is run via ``python -m spotbot.replay_main --sleeves --prior-pays`` (unchanged).
+Read-only: does not trade or change live rules. Defaults Candidate Spec env:
+RESEARCH_ENTRY=donchian_20, RESEARCH_TRAIL_ATR_MULT=3. Runs two adjacent
+1000-bar 5m windows via ``python -m spotbot.replay_main --sleeves`` (no
+``--prior-pays`` — Donchian+volume is the filter).
 
-Default: readiness check only (no heavy replay). Pass ``--run`` when ready.
-Never flips SPOT_ENTRIES / live buys.
+PASS bundle: eight pooled medians strictly > 0 AND ≥8 closed trades per
+half-rule cell. SPARSE if density fails. Never flips SPOT_ENTRIES.
 
-Each invocation appends one line to ``data/gate_history.jsonl`` (tip SHA,
-timestamp, readiness or eight medians). Use ``--no-journal`` to skip.
+Each invocation appends one line to ``data/gate_history.jsonl`` unless
+``--no-journal``.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 import sys
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,15 +33,22 @@ from spotbot.gate_journal import (  # noqa: E402
     default_journal_path,
     tip_sha,
 )
+
 BAR_MS = 300_000
 LIMIT = 1000
 # Candles must be entirely after this calendar day (open >= 2026-10-15 00:00 UTC).
+# Phase A research may use this sliding cut; holdout unlock starts 2026-11-18
+# (see MEASUREMENT_v2.md). This script does not unlock entries either way.
 UNSEEN_AFTER_MS = int(datetime(2026, 10, 15, tzinfo=timezone.utc).timestamp() * 1000)
+DENSITY_FLOOR = 8
 
 # Pooled medians only (not "earlier rsi major").
 _MEDIAN_LINE = re.compile(
     r"^median (earlier rsi|earlier lift-candles|later rsi|later lift-candles) "
     r"pairs=\d+ net=(-?\d+\.\d+)$"
+)
+_TRADE_LINE = re.compile(
+    r"^rule=(rsi|lift-candles):(earlier|later) symbol=\S+ bars=\d+ trades=(\d+)\b"
 )
 _LABELS = (
     "earlier rsi",
@@ -46,6 +56,13 @@ _LABELS = (
     "later rsi",
     "later lift-candles",
 )
+
+_RULE_TO_LABEL = {
+    ("rsi", "earlier"): "earlier rsi",
+    ("lift-candles", "earlier"): "earlier lift-candles",
+    ("rsi", "later"): "later rsi",
+    ("lift-candles", "later"): "later lift-candles",
+}
 
 
 @dataclass(frozen=True)
@@ -90,6 +107,21 @@ def parse_pooled_medians(text: str) -> dict[str, float]:
     return found
 
 
+def parse_trade_counts(text: str) -> dict[str, int]:
+    """Sum closed trades per half-rule label from one replay_main stdout."""
+    totals: dict[str, int] = defaultdict(int)
+    for line in text.splitlines():
+        m = _TRADE_LINE.match(line.strip())
+        if not m:
+            continue
+        rule, half, n_s = m.group(1), m.group(2), m.group(3)
+        label = _RULE_TO_LABEL.get((rule, half))
+        if label is None:
+            continue
+        totals[label] += int(n_s)
+    return dict(totals)
+
+
 def eight_strictly_positive(early: dict[str, float], late: dict[str, float]) -> bool:
     for label in _LABELS:
         if label not in early or label not in late:
@@ -99,10 +131,27 @@ def eight_strictly_positive(early: dict[str, float], late: dict[str, float]) -> 
     return True
 
 
+def density_ok(early_trades: dict[str, int], late_trades: dict[str, int], floor: int = DENSITY_FLOOR) -> bool:
+    for label in _LABELS:
+        if early_trades.get(label, 0) < floor or late_trades.get(label, 0) < floor:
+            return False
+    return True
+
+
+def _ensure_candidate_env() -> None:
+    """Freeze Candidate Spec defaults for this research branch gate."""
+    os.environ.setdefault("RESEARCH_ENTRY", "donchian_20")
+    os.environ.setdefault("RESEARCH_TRAIL_ATR_MULT", "3")
+
+
 def _print_plan(plan: GatePlan) -> None:
     after = datetime.fromtimestamp(UNSEEN_AFTER_MS / 1000, tz=timezone.utc).strftime(
         "%Y-%m-%d %H:%M:%S UTC"
     )
+    print(f"protocol=v2 candidate=donchian_20+atr_trail_x3")
+    print(f"research_entry={os.environ.get('RESEARCH_ENTRY')}")
+    print(f"research_trail_atr_mult={os.environ.get('RESEARCH_TRAIL_ATR_MULT')}")
+    print(f"prior_pays=off density_floor={DENSITY_FLOOR}")
     print(f"unseen_after_open>={after}")
     print(f"now_ms={plan.now_ms}")
     print(f"early_window end_ms={plan.early_end_ms} start_ms~={plan.early_start_ms}")
@@ -123,7 +172,6 @@ def _run_replay(end_ms: int) -> tuple[int, str]:
         "-m",
         "spotbot.replay_main",
         "--sleeves",
-        "--prior-pays",
         "--limit",
         str(LIMIT),
         "--end-ms",
@@ -136,6 +184,7 @@ def _run_replay(end_ms: int) -> tuple[int, str]:
         text=True,
         encoding="utf-8",
         errors="replace",
+        env=os.environ.copy(),
     )
     out = (proc.stdout or "") + (("\n" + proc.stderr) if proc.stderr else "")
     return int(proc.returncode), out
@@ -172,7 +221,7 @@ def _journal(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Unseen-tape gate (read-only). Does not enable entries."
+        description="Unseen-tape gate v2 trend candidate (read-only). Does not enable entries."
     )
     parser.add_argument(
         "--run",
@@ -192,10 +241,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     journal_on = not bool(args.no_journal)
+    _ensure_candidate_env()
 
     now_ms = int(args.now_ms) if args.now_ms else 0
     if now_ms <= 0:
-        # Local import so unit tests of plan_windows need no network.
         from spotbot.kucoin import KucoinClient, KucoinError, KucoinRateLimit
 
         try:
@@ -242,6 +291,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
     early = parse_pooled_medians(out_e)
+    early_trades = parse_trade_counts(out_e)
     print("--- window late ---")
     code_l, out_l = _run_replay(plan.late_end_ms)
     print(out_l.rstrip())
@@ -257,13 +307,16 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
     late = parse_pooled_medians(out_l)
+    late_trades = parse_trade_counts(out_l)
 
     print("--- eight medians ---")
     missing = False
     for label in _LABELS:
         e = early.get(label)
         l = late.get(label)
-        print(f"{label}: early={e!s} late={l!s}")
+        et = early_trades.get(label, 0)
+        lt = late_trades.get(label, 0)
+        print(f"{label}: early={e!s} late={l!s} trades_early={et} trades_late={lt}")
         if e is None or l is None:
             missing = True
 
@@ -280,10 +333,27 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
+    if not density_ok(early_trades, late_trades):
+        print(
+            f"GATE: SPARSE (closed trades < {DENSITY_FLOOR} in at least one half-rule cell; "
+            "entries stay off)"
+        )
+        _journal(
+            journal_on,
+            kind="run",
+            result="SPARSE",
+            ready=True,
+            now_ms=plan.now_ms,
+            early=early,
+            late=late,
+        )
+        return 1
+
     if eight_strictly_positive(early, late):
         print(
-            "GATE: PASS (all eight medians > 0). "
-            "Paper entries still require an explicit operator step; this script does not enable them."
+            "GATE: PASS (all eight medians > 0 and density ok). "
+            "Paper entries still require an explicit operator step; this script does not enable them. "
+            "Do not merge to main until operator confirms."
         )
         _journal(
             journal_on,

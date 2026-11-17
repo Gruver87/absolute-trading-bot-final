@@ -14,6 +14,8 @@ from spotbot.rules import budget_micro, plan_paper_buy
 from spotbot.sanity import follows_close, mark_ok, price_ok, slip_price
 from spotbot.kucoin import KLINE_LIMIT
 from spotbot.liquidity import candle_lift, prior_bar_pays, range_pays
+from spotbot.research_atr import atr_stop_bps, research_trail_atr_mult
+from spotbot.research_entry import research_entry, research_entry_from_bars, research_fill_ok, research_mode
 from spotbot.signals import entry_signal, mean_pays, reclaim_still, rise_pays
 
 
@@ -75,7 +77,13 @@ def replay_closes(
     require_prior: bool = False,
     highs: list[int] | None = None,
     lows: list[int] | None = None,
+    volumes: list[int] | None = None,
 ) -> ReplayResult:
+    research = research_mode()
+    trail_mult = research_trail_atr_mult()
+    need_highs = research == "donchian_20" or trail_mult is not None
+    need_lows = trail_mult is not None
+    need_vol = research == "donchian_20"
     if (
         not closes
         or closes[0] <= 0
@@ -96,12 +104,20 @@ def replay_closes(
         return ReplayResult(0, 0, 0, 0, False, ())
     if require_prior and (highs is None or lows is None or len(highs) != len(closes) or len(lows) != len(closes)):
         return ReplayResult(0, 0, 0, 0, True, (), open_known=False)
+    if research and need_highs and (highs is None or len(highs) != len(closes)):
+        return ReplayResult(0, 0, 0, 0, True, (), open_known=False)
+    if trail_mult is not None and (highs is None or lows is None or len(highs) != len(closes) or len(lows) != len(closes)):
+        return ReplayResult(0, 0, 0, 0, True, (), open_known=False)
+    if research and need_vol and (volumes is None or len(volumes) != len(closes)):
+        return ReplayResult(0, 0, 0, 0, True, (), open_known=False)
     clean: list[int] = []
     clean_opens: list[int] | None = [] if opens is not None else None
     clean_highs: list[int] = []
     clean_lows: list[int] = []
+    clean_vols: list[int] = []
     clean_times: list[int] = []
     kept_at: list[int] = []
+    keep_hl = require_prior or need_highs or need_lows
     for index, price in enumerate(closes):
         if not _usable(price):
             continue
@@ -111,9 +127,12 @@ def replay_closes(
         kept_at.append(index)
         if clean_opens is not None and opens is not None:
             clean_opens.append(opens[index])
-        if require_prior and highs is not None and lows is not None:
+        if keep_hl and highs is not None:
             clean_highs.append(highs[index])
+        if keep_hl and lows is not None:
             clean_lows.append(lows[index])
+        if need_vol and volumes is not None:
+            clean_vols.append(volumes[index])
         if bar_open_ms is not None:
             clean_times.append(bar_open_ms[index])
     if not clean:
@@ -133,6 +152,10 @@ def replay_closes(
     peak = 0
     base = 0
     spent = 0
+    pos_stop = stop_bps
+    pos_take = take_bps
+    pos_arm = trail_arm_bps
+    pos_gap = trail_gap_bps
     start = 40
     i = start
     stamps: list[int] = []
@@ -145,7 +168,27 @@ def replay_closes(
                 continue
             window = _signal_closes(closes, i)
             fill = _fill_price(opens, closes, i)
-            if require_rise:
+            if research:
+                hi_win = _signal_closes(clean_highs, i) if clean_highs else None
+                lo_win = _signal_closes(clean_lows, i) if clean_lows else None
+                vol_win = _signal_closes(clean_vols, i) if clean_vols else None
+                if research_entry(
+                    research,
+                    "REPLAY",
+                    window,
+                    highs=hi_win,
+                    lows=lo_win,
+                    volumes=vol_win,
+                    rsi_buy=rsi_buy,
+                ) is None:
+                    i += 1
+                    continue
+                if fill is not None and fill > 0 and not research_fill_ok(
+                    research, window, fill, highs=hi_win
+                ):
+                    i += 1
+                    continue
+            elif require_rise:
                 if not rise_pays(window, fill or 0, slip_bps, taker_bps):
                     i += 1
                     continue
@@ -185,11 +228,29 @@ def replay_closes(
             peak = paid
             base = bought
             spent = debit
+            pos_stop, pos_take, pos_arm, pos_gap = stop_bps, take_bps, trail_arm_bps, trail_gap_bps
+            if trail_mult is not None and clean_highs and clean_lows:
+                hi_win = _signal_closes(clean_highs, i)
+                lo_win = _signal_closes(clean_lows, i)
+                sized = atr_stop_bps(hi_win, lo_win, window, paid, trail_mult)
+                if sized is None:
+                    cash += debit
+                    fees -= fee
+                    entry = 0
+                    base = 0
+                    spent = 0
+                    i += 1
+                    continue
+                # ATR×N trailing stop: hard stop + trail gap = sized; take disabled.
+                pos_stop = sized
+                pos_gap = sized
+                pos_arm = 1
+                pos_take = 100_000
             i += 1
             continue
         raws = buckets[i] if buckets is not None else [closes[i]]
         reason, sold, peak = _walk_exit(
-            entry, peak, raws, slip_bps, stop_bps, take_bps, trail_arm_bps, trail_gap_bps
+            entry, peak, raws, slip_bps, pos_stop, pos_take, pos_arm, pos_gap
         )
         if reason is None:
             i += 1
@@ -249,6 +310,8 @@ def replay_lift_bars(
 
     Each bar is high, low, close, quote volume. A jumped close stays in the tape.
     """
+    research = research_mode()
+    trail_mult = research_trail_atr_mult()
     if (
         not bars
         or bars[0][2] <= 0
@@ -299,6 +362,10 @@ def replay_lift_bars(
     peak = 0
     base = 0
     spent = 0
+    pos_stop = stop_bps
+    pos_take = take_bps
+    pos_arm = trail_arm_bps
+    pos_gap = trail_gap_bps
     i = 14
     stamps: list[int] = []
     cooldown_until = 0
@@ -311,10 +378,20 @@ def replay_lift_bars(
             window = bars[: i + 1]
             volumes = [bar[3] for bar in window] + [1]
             high, low, close, _quote = window[-1]
-            if candle_lift("REPLAY", volumes, high, low, close) is None:
+            if research:
+                if research_entry_from_bars(research, "REPLAY", window) is None:
+                    i += 1
+                    continue
+            elif candle_lift("REPLAY", volumes, high, low, close) is None:
                 i += 1
                 continue
             fill = _fill_price(opens, [bar[2] for bar in bars], i)
+            if research and fill is not None and fill > 0:
+                closes_win = [bar[2] for bar in window]
+                highs_win = [bar[0] for bar in window]
+                if not research_fill_ok(research, closes_win, fill, highs=highs_win):
+                    i += 1
+                    continue
             if fill is not None and fill > 0 and not follows_close(bars[i][2], fill):
                 i += 1
                 continue
@@ -345,11 +422,29 @@ def replay_lift_bars(
             peak = paid
             base = bought
             spent = debit
+            pos_stop, pos_take, pos_arm, pos_gap = stop_bps, take_bps, trail_arm_bps, trail_gap_bps
+            if trail_mult is not None:
+                closes_win = [bar[2] for bar in window]
+                highs_win = [bar[0] for bar in window]
+                lows_win = [bar[1] for bar in window]
+                sized = atr_stop_bps(highs_win, lows_win, closes_win, paid, trail_mult)
+                if sized is None:
+                    cash += debit
+                    fees -= fee
+                    entry = 0
+                    base = 0
+                    spent = 0
+                    i += 1
+                    continue
+                pos_stop = sized
+                pos_gap = sized
+                pos_arm = 1
+                pos_take = 100_000
             i += 1
             continue
         raws = buckets[i] if buckets is not None else [bars[i][2]]
         reason, sold, peak = _walk_exit(
-            entry, peak, raws, slip_bps, stop_bps, take_bps, trail_arm_bps, trail_gap_bps
+            entry, peak, raws, slip_bps, pos_stop, pos_take, pos_arm, pos_gap
         )
         if reason is None:
             i += 1
