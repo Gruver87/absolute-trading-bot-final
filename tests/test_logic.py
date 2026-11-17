@@ -190,7 +190,7 @@ def test_dust_stays_in_the_equity_mark(tmp_path, monkeypatch) -> None:
     from spotbot.config import Config
     from spotbot.engine import _clock_ok, _close_positions
     from spotbot.guards import marked_equity
-    from spotbot.mexc import MexcError
+    from spotbot.kucoin import KucoinError
     from spotbot.rules import SymbolRule
     from spotbot.state import Book, Position
 
@@ -198,7 +198,7 @@ def test_dust_stays_in_the_equity_mark(tmp_path, monkeypatch) -> None:
 
     class _NoClock:
         def server_time_ms(self) -> int:
-            raise MexcError("time unread")
+            raise KucoinError("time unread")
 
     assert _clock_ok(_NoClock()) is False
 
@@ -384,10 +384,10 @@ def test_a_dark_stretch_does_not_sell_a_loss(tmp_path, monkeypatch) -> None:
 
     import requests
 
-    from spotbot.mexc import MexcClient
+    from spotbot.kucoin import KucoinClient
     import spotbot.oracle as oracle
 
-    assert MexcClient("", "", 5)._session().trust_env is False
+    assert KucoinClient("", "", 5)._session().trust_env is False
     oracle._LOCAL.session = None
 
     def _down(*_args: object, **_kwargs: object) -> None:
@@ -399,8 +399,8 @@ def test_a_dark_stretch_does_not_sell_a_loss(tmp_path, monkeypatch) -> None:
 
 
 def test_a_json_float_is_not_a_price() -> None:
-    from spotbot.mexc import (
-        MexcError,
+    from spotbot.kucoin import (
+        KucoinError,
         ack_commission,
         book_prices,
         depth_notionals,
@@ -430,13 +430,13 @@ def test_a_json_float_is_not_a_price() -> None:
             {"symbol": "BTCUSDT", "bidPrice": 1.25, "askPrice": "1.26", "bidQty": "1", "askQty": "1"},
             "BTCUSDT",
         )
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "book" in str(exc)
     else:
         raise AssertionError("a JSON float is not a book price")
     try:
         ticker_price({"symbol": "BTCUSDT", "price": 1.25}, "BTCUSDT")
-    except MexcError:
+    except KucoinError:
         pass
     else:
         raise AssertionError("a JSON float is not a last price")
@@ -445,7 +445,7 @@ def test_a_json_float_is_not_a_price() -> None:
             {"bids": [[1.25, "1"]], "asks": [["1.26", "1"]], "lastUpdateId": 1},
             "BTCUSDT",
         )
-    except MexcError:
+    except KucoinError:
         pass
     else:
         raise AssertionError("a JSON float is not a depth level")
@@ -453,7 +453,7 @@ def test_a_json_float_is_not_a_price() -> None:
     floated = [1_700_000_000_000, 1.25, "1", "1", "1", "1", 1_700_000_299_999, "1"]
     try:
         parse_klines("BTCUSDT", [floated, candle])
-    except MexcError:
+    except KucoinError:
         pass
     else:
         raise AssertionError("a JSON float is not a candle")
@@ -467,13 +467,13 @@ def test_a_json_float_is_not_a_price() -> None:
     assert ranked == []
     try:
         parse_account({"balances": [{"asset": "USDT", "free": 1.5, "locked": "0"}]})
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "decimal" in str(exc)
     else:
         raise AssertionError("a JSON float is not a balance")
     try:
         ack_commission({"commission": 0.01, "commissionAsset": "USDT"}, "BTC")
-    except MexcError:
+    except KucoinError:
         pass
     else:
         raise AssertionError("a JSON float is not a commission")
@@ -514,7 +514,7 @@ def test_a_json_float_is_not_a_price() -> None:
 
 
 def test_exchange_filters_refuse_a_json_float() -> None:
-    from spotbot.mexc import MexcError, _filled_base_text, _order_id_text
+    from spotbot.kucoin import KucoinError, _filled_base_text, _order_id_text
     from spotbot.oracle import _binance_price, _bybit_price, _okx_price
     from spotbot.reconcile import FeeAssetError, split_commission
     from spotbot.rules import RuleError, parse_symbol_rule
@@ -560,13 +560,13 @@ def test_exchange_filters_refuse_a_json_float() -> None:
     assert _okx_price({"data": [{"instId": "BTC-USDT", "last": 1.25}]}, "BTC-USDT") is None
     try:
         _filled_base_text({"executedQty": 0.1}, "buy")
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "decimal" in str(exc)
     else:
         raise AssertionError("a JSON float is not a fill")
     try:
         _order_id_text(12.0)
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "digits" in str(exc)
     else:
         raise AssertionError("a JSON float is not an order id")
@@ -595,7 +595,7 @@ def test_exchange_filters_refuse_a_json_float() -> None:
 def test_a_bad_sibling_does_not_stop_the_sell(tmp_path, monkeypatch) -> None:
     from spotbot.config import Config
     from spotbot.engine import _now_ms, run_cycle, sibling_pending
-    from spotbot.mexc import MexcClient, MexcError, _json_body, parse_klines
+    from spotbot.kucoin import KucoinClient, KucoinError, _json_body, parse_klines
     from spotbot.money import MoneyError, base_for_quote, decimal_zero, implied_price_micro
     from spotbot.rules import SymbolRule
     from spotbot.sanity import jump_bps
@@ -620,17 +620,17 @@ def test_a_bad_sibling_does_not_stop_the_sell(tmp_path, monkeypatch) -> None:
     loud = [3_000, "1", "1.1", "0.9", "1", "1", 4_000, "10"]
     try:
         parse_klines("BTCUSDT", [quiet, loud])
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "volume" in str(exc)
     else:
         raise AssertionError("a candle with no base volume must be refused")
-    client = MexcClient("", "", 5)
+    client = KucoinClient("", "", 5)
     client._session().cookies.set_cookie(object())
     assert len(client._session().cookies) == 0
     huge = type("R", (), {"content": b"x" * (8_000_001)})()
     try:
         _json_body(huge, "ticker")
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "large" in str(exc)
     else:
         raise AssertionError("a huge response must be refused")
@@ -670,10 +670,10 @@ def test_a_bad_sibling_does_not_stop_the_sell(tmp_path, monkeypatch) -> None:
 
         def market_sell_base(self, symbol: str, _base: int, _client: str):
             sent.append(symbol)
-            raise MexcError("stop before the wire")
+            raise KucoinError("stop before the wire")
 
         def order_by_client(self, _symbol: str, _client: str) -> dict[str, str]:
-            raise MexcError("order is not on the wire")
+            raise KucoinError("order is not on the wire")
 
     cfg = Config(
         symbols=("BTCUSDT",),
@@ -750,7 +750,7 @@ def test_a_bool_is_not_a_price_and_a_huge_book_stays(tmp_path) -> None:
 
 
 def test_a_bool_is_not_a_peer_or_a_client_id(tmp_path) -> None:
-    from spotbot.mexc import MexcClient, MexcError, clock_allows
+    from spotbot.kucoin import KucoinClient, KucoinError, clock_allows
     from spotbot.oracle import ahead_exit, deviation_bps, lag_bps
     from spotbot.guards import pair_locked
     from spotbot.rules import budget_micro, cap_spend, plan_paper_buy
@@ -760,8 +760,8 @@ def test_a_bool_is_not_a_peer_or_a_client_id(tmp_path) -> None:
 
     assert clock_allows(True, True) is False
     try:
-        MexcClient("", "", True)
-    except MexcError:
+        KucoinClient("", "", True)
+    except KucoinError:
         pass
     else:
         raise AssertionError("a bool is not a timeout")
@@ -954,7 +954,7 @@ def test_a_fraction_does_not_match_an_integer_fill() -> None:
 def test_a_fraction_is_not_sent_or_remembered() -> None:
     from spotbot.engine import _over_request
     from spotbot.guards import drawdown_blocks, marked_equity, pair_locked
-    from spotbot.mexc import rank_liquid
+    from spotbot.kucoin import rank_liquid
     from spotbot.money import format_fixed, implied_price_micro
     from spotbot.sanity import slip_price
     from spotbot.signals import entry_signal
@@ -993,26 +993,26 @@ def test_a_fraction_is_not_sent_or_remembered() -> None:
 def test_a_fraction_is_not_a_clock_or_a_candle_limit() -> None:
     from spotbot.analyzer import _score_python
     from spotbot.engine import _entries_halted, _try_buy, _unseen
-    from spotbot.mexc import MexcClient, MexcError, MexcRateLimit, clock_allows, parse_account, parse_klines
+    from spotbot.kucoin import KucoinClient, KucoinError, KucoinRateLimit, clock_allows, parse_account, parse_klines
     from spotbot.reconcile import order_is_ours
     from spotbot.state import Book
 
     assert clock_allows(1_000.0, 1_000.0) is False
-    assert MexcRateLimit("limited", 1.5).retry_after_sec is None
+    assert KucoinRateLimit("limited", 1.5).retry_after_sec is None
     book = Book(cash_micro=1_000_000, positions=[], realized_micro=0)
     assert _entries_halted(book, 1.5, 0) is True
     book.seen_at = 1.5
     assert _unseen(book, 10_000, 60) is True
     assert _score_python(20_000.0, 6_500, 10, 30, 2_000, 1_000) == 0
     try:
-        MexcClient("", "").klines("BTCUSDT", "5m", 1.5)
-    except MexcError as exc:
+        KucoinClient("", "").klines("BTCUSDT", "5m", 1.5)
+    except KucoinError as exc:
         assert "integer" in str(exc)
     else:
         raise AssertionError("a fraction must not be sent as a kline limit")
     try:
         parse_klines("BTCUSDT", [], 300_000.0)
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "interval" in str(exc)
     else:
         raise AssertionError("a fraction is not a candle span")
@@ -1020,7 +1020,7 @@ def test_a_fraction_is_not_a_clock_or_a_candle_limit() -> None:
     assert order_is_ours(ack, "BTCUSDT", "BUY", "1") is False
     try:
         parse_account([])
-    except MexcError:
+    except KucoinError:
         pass
     else:
         raise AssertionError("an account list is not balances")
@@ -1056,14 +1056,14 @@ def test_a_fraction_is_not_a_successful_exchange_code() -> None:
 
     from spotbot.config import ConfigError, require_cycle_config
     from spotbot.engine import open_loss_micro
-    from spotbot.mexc import MexcError, _reject_exchange_code, book_prices, depth_notionals, rank_liquid, ticker_price
+    from spotbot.kucoin import KucoinError, _reject_exchange_code, book_prices, depth_notionals, rank_liquid, ticker_price
     from spotbot.reconcile import inventory_mismatch
     from spotbot.rules import uses_slot
     from spotbot.state import Book, LedgerError, Position, load_book
 
     try:
         _reject_exchange_code({"code": 0.0})
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "refused" in str(exc)
     else:
         raise AssertionError("a fractional exchange code is not success")
@@ -1079,19 +1079,19 @@ def test_a_fraction_is_not_a_successful_exchange_code() -> None:
         raise AssertionError("fractional paper cash must not open a book")
     try:
         ticker_price({"symbol": 1, "price": "1"}, "BTCUSDT")
-    except MexcError:
+    except KucoinError:
         pass
     else:
         raise AssertionError("a numeric ticker name is not the pair")
     try:
         book_prices({"symbol": 1, "bidPrice": "1", "askPrice": "1.01", "bidQty": "1", "askQty": "1"}, "BTCUSDT")
-    except MexcError:
+    except KucoinError:
         pass
     else:
         raise AssertionError("a numeric book name is not the pair")
     try:
         depth_notionals({"symbol": 1, "bids": [["1", "1"]], "asks": [["2", "1"]], "lastUpdateId": 1}, "BTCUSDT")
-    except MexcError:
+    except KucoinError:
         pass
     else:
         raise AssertionError("a numeric depth name is not the pair")
@@ -1183,7 +1183,7 @@ def test_a_numeric_trade_id_is_not_our_order() -> None:
 
 
 def test_a_nearby_code_is_not_an_unknown_order() -> None:
-    from spotbot.mexc import MexcClient, MexcError
+    from spotbot.kucoin import KucoinClient, KucoinError
     from spotbot.oracle import venue_quotes
     from spotbot.reconcile import order_missing
     from spotbot.rules import parse_symbol_rule
@@ -1193,8 +1193,8 @@ def test_a_nearby_code_is_not_an_unknown_order() -> None:
     assert venue_quotes(1) == {}
     assert venue_quotes("BTCUSDT", 1.5) == {}
     try:
-        MexcClient("", "").symbol_rule(1)
-    except MexcError as exc:
+        KucoinClient("", "").symbol_rule(1)
+    except KucoinError as exc:
         assert "text" in str(exc)
     else:
         raise AssertionError("a numeric pair must not be requested")
@@ -1340,30 +1340,30 @@ def test_a_numeric_id_in_the_book_is_not_text(tmp_path) -> None:
 
 def test_a_zero_fill_quote_is_not_replaced() -> None:
     from spotbot.engine import _apply_progress
-    from spotbot.mexc import MexcClient, MexcError, ack_commission, executed_fill, parse_account
+    from spotbot.kucoin import KucoinClient, KucoinError, ack_commission, executed_fill, parse_account
     from spotbot.reconcile import inventory_mismatch
     from spotbot.state import Book
 
     try:
         executed_fill({"executedQty": "1", "cummulativeQuoteQty": 0, "cumulativeQuoteQty": "5"})
-    except MexcError:
+    except KucoinError:
         pass
     else:
         raise AssertionError("a present zero quote must not use the other field")
     try:
         ack_commission({"commission": "0.01", "commissionAsset": 1}, "BTC")
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "text" in str(exc)
     else:
         raise AssertionError("a numeric commission asset must not be booked")
     try:
         parse_account({"balances": [{"asset": 1, "free": "1", "locked": "0"}]})
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "text" in str(exc)
     else:
         raise AssertionError("a numeric balance asset must not be stored")
     assert inventory_mismatch([(1, 100)], {}) == "pair name is not text"
-    client = MexcClient("", "")
+    client = KucoinClient("", "")
     for call in (
         lambda: client.ohlcv(1),
         lambda: client.book_top(1),
@@ -1374,7 +1374,7 @@ def test_a_zero_fill_quote_is_not_replaced() -> None:
     ):
         try:
             call()
-        except MexcError as exc:
+        except KucoinError as exc:
             assert "text" in str(exc) or "pair" in str(exc) or "client" in str(exc)
         else:
             raise AssertionError("a numeric name must not be requested")
@@ -1386,7 +1386,7 @@ def test_a_zero_fill_quote_is_not_replaced() -> None:
 def test_a_text_flag_does_not_open_the_live_book(tmp_path) -> None:
     from spotbot.engine import _order_fees
     from spotbot.guards import note_pair_stop, pair_locked
-    from spotbot.mexc import MexcClient, MexcError, _base_asset
+    from spotbot.kucoin import KucoinClient, KucoinError, _base_asset
     from spotbot.sleeves import SleeveError, ledger_dir
     from spotbot.state import Book, LedgerError, record_buy, remember_pending
 
@@ -1410,16 +1410,16 @@ def test_a_text_flag_does_not_open_the_live_book(tmp_path) -> None:
     assert _order_fees(None, 1, "1", "BUY") is None
     try:
         _base_asset(1)
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "USDT" in str(exc)
     else:
         raise AssertionError("a numeric base must not be read")
-    client = MexcClient("", "")
+    client = KucoinClient("", "")
     assert client.liquid_usdt(True, 0, 1, 1) == []
     for call in (lambda: client.ohlcv("btc"), lambda: client.symbol_rule("btc"), lambda: client.my_trades("btc")):
         try:
             call()
-        except MexcError as exc:
+        except KucoinError as exc:
             assert "USDT" in str(exc)
         else:
             raise AssertionError("a pair that is not USDT must not be requested")
@@ -1427,7 +1427,7 @@ def test_a_text_flag_does_not_open_the_live_book(tmp_path) -> None:
 
 def test_a_text_live_flag_does_not_trade(monkeypatch) -> None:
     from spotbot.config import ConfigError, load_config
-    from spotbot.mexc import MexcClient, MexcError
+    from spotbot.kucoin import KucoinClient, KucoinError
     from spotbot.state import Book, LedgerError, Position, audit_book, record_buy, record_sell_fill
 
     try:
@@ -1460,8 +1460,8 @@ def test_a_text_live_flag_does_not_trade(monkeypatch) -> None:
         "SPOT_MAX_POSITIONS": "1",
         "SPOT_ALLOC_BPS": "2000",
         "SPOT_RSI_BUY": "35",
-        "MEXC_API_KEY": "line\nkey",
-        "MEXC_API_SECRET": "secret",
+        "KUCOIN_API_KEY": "line\nkey",
+        "KUCOIN_API_SECRET": "secret",
     }.items():
         monkeypatch.setenv(name, value)
     try:
@@ -1471,8 +1471,8 @@ def test_a_text_live_flag_does_not_trade(monkeypatch) -> None:
     else:
         raise AssertionError("a broken API key must not load")
     try:
-        MexcClient("line\nkey", "secret")
-    except MexcError as exc:
+        KucoinClient("line\nkey", "secret")
+    except KucoinError as exc:
         assert "single line" in str(exc)
     else:
         raise AssertionError("a broken API key must not sign")
@@ -1502,21 +1502,21 @@ def test_a_signed_request_stays_on_the_api_path(tmp_path) -> None:
 
     from spotbot.config import Config, ConfigError, require_cycle_config
     from spotbot.journal import note_event
-    from spotbot.mexc import MexcClient, MexcError, _retry_after_sec, new_client_order_id
+    from spotbot.kucoin import KucoinClient, KucoinError, _retry_after_sec, new_client_order_id
     from spotbot.ops_http import _heartbeat
 
-    client = MexcClient("key", "secret")
+    client = KucoinClient("key", "secret", api_passphrase="pass")
     for call in (
-        lambda: client._signed("DELETE", "/api/v3/order", {}),
+        lambda: client._signed("DELETE", "/api/v1/orders", {}),
         lambda: client._signed("GET", "https://evil.example/api", {}),
-        lambda: client._signed("GET", "/api/v3/account", {"symbol": 1}),
-        lambda: client._public("/api/v3/time", {"limit": True}),
+        lambda: client._signed("GET", "/api/v1/accounts", {"symbol": 1}),
+        lambda: client._public("/api/v1/timestamp", {"limit": True}),
         lambda: new_client_order_id(1, "B"),
         lambda: new_client_order_id("BTCUSDT", "BUY"),
     ):
         try:
             call()
-        except MexcError as exc:
+        except KucoinError as exc:
             assert "refused" in str(exc) or "text" in str(exc) or "USDT" in str(exc)
         else:
             raise AssertionError("a bad request must not be signed")
@@ -1616,7 +1616,7 @@ def test_a_long_digit_string_is_not_a_setting(monkeypatch, tmp_path) -> None:
 
 def test_an_amount_above_the_ceiling_is_not_money() -> None:
     from spotbot.config import Config, ConfigError, load_config, require_cycle_config
-    from spotbot.mexc import MexcClient, MexcError
+    from spotbot.kucoin import KucoinClient, KucoinError
     from spotbot.money import MoneyError, decimal_text, format_usdt, notional_micro, to_satoshi
     from spotbot.state import Book, LedgerError, Position, audit_book, load_book
 
@@ -1669,8 +1669,8 @@ def test_an_amount_above_the_ceiling_is_not_money() -> None:
     else:
         raise AssertionError("a huge entry must not be saved")
     try:
-        MexcClient("k" * 257, "secret")
-    except MexcError as exc:
+        KucoinClient("k" * 257, "secret")
+    except KucoinError as exc:
         assert "single line" in str(exc)
     else:
         raise AssertionError("a huge API key must not be kept")
@@ -1707,10 +1707,10 @@ def test_an_amount_above_the_ceiling_is_not_money() -> None:
         assert "rsi" in str(exc)
     else:
         raise AssertionError("a huge mode name must not load")
-    client = MexcClient("key", "secret")
+    client = KucoinClient("key", "secret", api_passphrase="pass")
     try:
-        client._signed("GET", "/api/v3/account", {"symbol": "X" * 81})
-    except MexcError as exc:
+        client._signed("GET", "/api/v1/accounts", {"symbol": "X" * 81})
+    except KucoinError as exc:
         assert "text" in str(exc)
     else:
         raise AssertionError("a huge query value must not be signed")
@@ -1719,7 +1719,7 @@ def test_an_amount_above_the_ceiling_is_not_money() -> None:
 def test_a_product_above_the_ceiling_is_not_a_fill() -> None:
     from spotbot.exits import pnl_bps
     from spotbot.fees import fee_on, paper_buy, paper_sell
-    from spotbot.mexc import MexcError, _base_atoms, depth_notionals
+    from spotbot.kucoin import KucoinError, _base_atoms, depth_notionals
     from spotbot.money import MoneyError, base_for_quote, implied_price_micro
     from spotbot.rules import plan_paper_buy
     from spotbot.sanity import mark_ok, price_ok, slip_price
@@ -1751,7 +1751,7 @@ def test_a_product_above_the_ceiling_is_not_a_fill() -> None:
         raise AssertionError("a price at the ceiling must not be a profit")
     try:
         _base_atoms("10000000000000000")
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "large" in str(exc)
     else:
         raise AssertionError("a huge fill must not become atoms")
@@ -1765,7 +1765,7 @@ def test_a_product_above_the_ceiling_is_not_a_fill() -> None:
             },
             "BTCUSDT",
         )
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "large" in str(exc)
     else:
         raise AssertionError("a huge depth sum must not be a wall")
@@ -1773,7 +1773,7 @@ def test_a_product_above_the_ceiling_is_not_a_fill() -> None:
 
 def test_a_fraction_is_not_a_volume_signal() -> None:
     from spotbot.liquidity import candle_lift, close_position_bps, lift_signal
-    from spotbot.mexc import MexcError, _depth_side, parse_account, parse_klines, positive_int
+    from spotbot.kucoin import KucoinError, _depth_side, parse_account, parse_klines, positive_int
     from spotbot.money import format_price
 
     volumes = [1] * 12 + [4, 1]
@@ -1790,29 +1790,29 @@ def test_a_fraction_is_not_a_volume_signal() -> None:
     try:
         positive_int("1" * 25, "time")
         raise AssertionError("a long time must not be read")
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "integer" in str(exc) or "large" in str(exc)
     try:
         parse_klines("BTCUSDT", [[]] * 1_001)
         raise AssertionError("too many candles must not be parsed")
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "many" in str(exc)
     try:
         _depth_side([["1", "1"]] * 5_001)
         raise AssertionError("too many levels must not be parsed")
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "large" in str(exc)
     try:
         parse_account({"balances": [{}] * 5_001})
         raise AssertionError("too many balances must not be parsed")
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "many" in str(exc)
 
 
 def test_a_ceiling_price_is_not_a_peer_or_a_score() -> None:
     from spotbot.analyzer import score
     from spotbot.guards import drawdown_blocks, marked_equity, note_pair_stop, top_spread_bps
-    from spotbot.mexc import MexcError, _public_limit, rank_liquid
+    from spotbot.kucoin import KucoinError, _public_limit, rank_liquid
     from spotbot.oracle import deviation_bps, entry_allowed, lag_bps, venue_quotes
     from spotbot.signals import entry_signal
     from spotbot.state import Book, Position
@@ -1835,12 +1835,12 @@ def test_a_ceiling_price_is_not_a_peer_or_a_score() -> None:
     try:
         rank_liquid([{}] * 20_001, 1, -10_000, 10_000, 8)
         raise AssertionError("a huge ticker must not be ranked")
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "large" in str(exc)
     try:
         _public_limit(5_001, "depth")
         raise AssertionError("a huge limit must not be sent")
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "large" in str(exc)
     book = Book(cash_micro=1, positions=[], realized_micro=0)
     book.pair_stops = {"BTCUSDT": ["nope"]}
@@ -1849,7 +1849,7 @@ def test_a_ceiling_price_is_not_a_peer_or_a_score() -> None:
 
 
 def test_a_long_book_is_not_opened_and_a_list_is_not_one_price(tmp_path) -> None:
-    from spotbot.mexc import MexcError, _reject_exchange_code, _require_filled, clock_allows, signed_payload
+    from spotbot.kucoin import KucoinError, _reject_exchange_code, _require_filled, clock_allows, signed_payload
     from spotbot.oracle import _bybit_price, _okx_price
     from spotbot.reconcile import FeeAssetError, split_commission
     from spotbot.rules import parse_symbol_rule
@@ -1863,18 +1863,18 @@ def test_a_long_book_is_not_opened_and_a_list_is_not_one_price(tmp_path) -> None
     try:
         _require_filled({"status": {"not": "text"}}, "fill")
         raise AssertionError("a status object must not be filled")
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "filled" in str(exc)
     assert _require_filled({"status": 2}, "fill") is None
     try:
         signed_payload([{}] * 5_001, True)
         raise AssertionError("a huge trade list must not be read")
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "large" in str(exc)
     try:
         _reject_exchange_code({"code": {"bad": True}, "msg": {"bad": True}})
         raise AssertionError("a code object must not be success")
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "refused" in str(exc)
     try:
         split_commission([{}] * 5_001, "1", "BTC", "BUY")
@@ -1917,7 +1917,7 @@ def test_a_long_book_is_not_opened_and_a_list_is_not_one_price(tmp_path) -> None
 def test_an_order_at_the_ceiling_is_not_sent(tmp_path) -> None:
     from spotbot.config import ConfigError, require_cycle_config
     from spotbot.journal import note_quote
-    from spotbot.mexc import MexcError, _interval_ms, _order_request
+    from spotbot.kucoin import KucoinError, _interval_ms, _order_request
     from spotbot.oracle import deviation_bps, lag_bps
     from spotbot.reconcile import FeeAssetError, base_is_free, inventory_mismatch, order_missing, usdt_commission
     from spotbot.sleeves import SleeveError, split_equal
@@ -1926,12 +1926,12 @@ def test_an_order_at_the_ceiling_is_not_sent(tmp_path) -> None:
     try:
         _order_request("BTCUSDT", "abc", 10**24)
         raise AssertionError("a ceiling order must not be sent")
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "size" in str(exc) or "positive" in str(exc)
     try:
         _interval_ms(1)
         raise AssertionError("a numeric interval must not be used")
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "interval" in str(exc)
     assert lag_bps(100, [100] * 9) is None
     assert deviation_bps([100] * 9) is None
@@ -2013,7 +2013,7 @@ def test_an_order_at_the_ceiling_is_not_sent(tmp_path) -> None:
 
 def test_a_long_reason_does_not_debit() -> None:
     from spotbot.engine import sibling_pending
-    from spotbot.mexc import MexcClient, MexcError
+    from spotbot.kucoin import KucoinClient, KucoinError
     from spotbot.oracle import venue_quotes
     from spotbot.reconcile import fee_fits, fills_match, order_is_ours
     from spotbot.state import Book, LedgerError, remember_pending, record_buy
@@ -2031,9 +2031,9 @@ def test_a_long_reason_does_not_debit() -> None:
     assert order_is_ours({"clientOrderId": "a" * 8, "symbol": "BTCUSDT", "side": "BUY", "type": "MARKET"}, "BTCUSDT", "BUY", "a" * 40) is False
     assert venue_quotes("BTCUSDT", 31) == {}
     try:
-        MexcClient("", "", 31)
+        KucoinClient("", "", 31)
         raise AssertionError("a long timeout must not be kept")
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "timeout" in str(exc)
     assert sibling_pending(tuple(__import__("pathlib").Path(f"missing-{i}.json") for i in range(9))) == "too many sibling books"
 
@@ -2041,7 +2041,7 @@ def test_a_long_reason_does_not_debit() -> None:
 def test_a_sell_does_not_push_cash_over_the_ceiling() -> None:
     from spotbot.engine import mark_stop_cooldown, open_loss_micro
     from spotbot.guards import note_pair_stop
-    from spotbot.mexc import DecimalChange, MexcError, parse_account
+    from spotbot.kucoin import DecimalChange, KucoinError, parse_account
     from spotbot.oracle import cheapest_first
     from spotbot.state import Book, Position, record_buy, record_sell_fill
 
@@ -2073,7 +2073,7 @@ def test_a_sell_does_not_push_cash_over_the_ceiling() -> None:
             }
         )
         raise AssertionError("two huge balances must not be a balance")
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "large" in str(exc)
     assert cheapest_first([("BTCUSDT", 1)] * 33) == []
     rich = Position("BTCUSDT", 1, 1, 10**24, 1, "held")
@@ -2093,7 +2093,7 @@ def test_a_ceiling_price_is_not_a_log_crash(tmp_path) -> None:
     assert wide["positions"] == "не читается"
     (tmp_path / "ops_heartbeat.json").write_text('{"at": "%s", "book": "major"}' % ("x" * 41), encoding="utf-8")
     assert _heartbeat(tmp_path) is None
-    quotes = {f"A{i}USDT": {"mexc": "1"} for i in range(33)}
+    quotes = {f"A{i}USDT": {"kucoin": "1"} for i in range(33)}
     (tmp_path / "ops_quotes.json").write_text(__import__("json").dumps(quotes), encoding="utf-8")
     assert _quotes(tmp_path) == {}
     book = Book(cash_micro=1_000, positions=[], realized_micro=0)
@@ -2235,7 +2235,7 @@ def test_a_value_error_keeps_the_peak_already_moved(tmp_path, monkeypatch) -> No
 def test_a_clock_limit_still_saves_the_morning_stamp(tmp_path) -> None:
     from spotbot.config import Config
     from spotbot.engine import run_cycle, trading_day
-    from spotbot.mexc import MexcRateLimit
+    from spotbot.kucoin import KucoinRateLimit
     from spotbot.state import Book, load_book, save_book
 
     class _ClockLimited:
@@ -2243,7 +2243,7 @@ def test_a_clock_limit_still_saves_the_morning_stamp(tmp_path) -> None:
             return None
 
         def server_time_ms(self) -> int:
-            raise MexcRateLimit("429")
+            raise KucoinRateLimit("429")
 
         def book_top(self, _symbol: str) -> tuple[int, int]:
             raise AssertionError("a clock limit must not read the book")
@@ -2277,7 +2277,7 @@ def test_a_clock_limit_still_saves_the_morning_stamp(tmp_path) -> None:
     save_book(path, book)
     try:
         run_cycle(cfg, _ClockLimited(), path)
-    except MexcRateLimit as exc:
+    except KucoinRateLimit as exc:
         assert "429" in str(exc)
     else:
         raise AssertionError("a clock limit must leave the cycle after the book is saved")
@@ -2302,14 +2302,14 @@ def test_a_second_holder_does_not_open_the_same_ledger(tmp_path) -> None:
 
 def test_an_accepted_order_keeps_its_exchange_id(tmp_path) -> None:
     from spotbot.engine import _keep_exchange_ack
-    from spotbot.mexc import MexcClient, MexcError, MexcOrderAccepted
+    from spotbot.kucoin import KucoinClient, KucoinError, KucoinOrderAccepted
     from spotbot.reconcile import pending_gone
     from spotbot.state import load_book, remember_pending, save_book
 
     client_id = "a" * 32
 
-    class _Partial(MexcClient):
-        def _signed(self, _method: str, _path: str, _query: dict[str, str]) -> dict[str, object]:
+    class _Partial(KucoinClient):
+        def _signed(self, _method: str, _path: str, _query: dict[str, str], **_kwargs) -> dict[str, object]:
             return {
                 "symbol": "BTCUSDT",
                 "side": "BUY",
@@ -2317,21 +2317,23 @@ def test_an_accepted_order_keeps_its_exchange_id(tmp_path) -> None:
                 "clientOrderId": client_id,
                 "orderId": "42",
                 "status": "PARTIALLY_FILLED",
+                "dealSize": "0.01",
+                "dealFunds": "1",
             }
 
     try:
         _Partial("", "").market_buy_quote("BTCUSDT", 1_000_000, client_id)
         raise AssertionError("a partial ack must not be booked as a full fill")
-    except MexcOrderAccepted as exc:
+    except KucoinOrderAccepted as exc:
         assert exc.exchange_order_id == "42"
         assert "filled" in str(exc)
-    except MexcError as exc:
+    except KucoinError as exc:
         raise AssertionError(f"a partial ack must keep the exchange id: {exc}") from exc
     path = tmp_path / "ack.json"
     book = load_book(path, 1_000_000)
     remember_pending(book, client_id, "BTCUSDT", "BUY", 0, 1_000_000)
     save_book(path, book)
-    _keep_exchange_ack(book, path, MexcOrderAccepted("buy status is not filled", "42"))
+    _keep_exchange_ack(book, path, KucoinOrderAccepted("buy status is not filled", "42"))
     saved = load_book(path, 0)
     assert saved.pending_client_id == client_id
     assert saved.pending_exchange_order_id == "42"
@@ -2340,7 +2342,7 @@ def test_an_accepted_order_keeps_its_exchange_id(tmp_path) -> None:
 
 def test_a_ceiling_size_is_not_an_order_and_a_far_candle_is_not_a_time(tmp_path) -> None:
     from spotbot.journal import note_heartbeat
-    from spotbot.mexc import MexcError, parse_klines
+    from spotbot.kucoin import KucoinError, parse_klines
     from spotbot.ops_http import _heartbeat
     from spotbot.rules import budget_micro, cap_spend, round_base_atoms, round_quote_micro, uses_slot
     from spotbot.signals import closed_prices
@@ -2358,7 +2360,7 @@ def test_a_ceiling_size_is_not_an_order_and_a_far_candle_is_not_a_time(tmp_path)
     try:
         parse_klines("BTCUSDT", [far, nxt])
         raise AssertionError("a candle time past the clock ceiling must not be read")
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "time" in str(exc)
     book = Book(cash_micro=1_000, positions=[], realized_micro=0)
     book.pending_misses = 1_001
@@ -2374,37 +2376,37 @@ def test_a_ceiling_size_is_not_an_order_and_a_far_candle_is_not_a_time(tmp_path)
 
 
 def test_a_wide_row_is_not_a_candle_and_a_deep_page_is_not_unfolded() -> None:
-    from spotbot.mexc import MexcError, _base_asset, _depth_side, ack_commission, parse_klines
+    from spotbot.kucoin import KucoinError, _base_asset, _depth_side, ack_commission, parse_klines
     from spotbot.ops_http import _public
 
     assert _base_asset("BTCUSDT") == "BTC"
     try:
         _base_asset("ABCDEFGHIJKUSDT")
         raise AssertionError("a base longer than 10 characters must not be a pair")
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "USDT" in str(exc)
     try:
         ack_commission({"commission": "1", "commissionAsset": "not coin"}, "BTC")
         raise AssertionError("a commission name with a space must not be a fee")
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "text" in str(exc)
     try:
         ack_commission({"commission": "10000000000000000", "commissionAsset": "BTC"}, "BTC")
         raise AssertionError("a base commission at the ceiling must not be booked")
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "large" in str(exc) or "decimal" in str(exc)
     wide_level = ["1", "1", "0", "0", "0", "0", "0", "0", "0"]
     try:
         _depth_side([wide_level])
         raise AssertionError("a depth level wider than eight fields must not be read")
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "wide" in str(exc)
     candle = [1_000, "1", "1.1", "0.9", "1", "1", 2_000, "10"] + [0] * 9
     later = [3_000, "1", "1.1", "0.9", "1", "1", 4_000, "10"]
     try:
         parse_klines("BTCUSDT", [candle, later])
         raise AssertionError("a kline row wider than sixteen fields must not be read")
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "row" in str(exc)
     nested: object = "x"
     for _ in range(12):
@@ -2476,7 +2478,7 @@ def test_a_ceiling_balance_is_not_a_match(tmp_path) -> None:
 
     from spotbot.engine import _order_fees, _sibling_positions
     from spotbot.journal import note_event
-    from spotbot.mexc import _net_text
+    from spotbot.kucoin import _net_text
     from spotbot.oracle import _okx_inst
     from spotbot.reconcile import (
         FeeAssetError,
@@ -2523,7 +2525,7 @@ def test_a_long_order_id_is_not_read(monkeypatch, tmp_path) -> None:
     from spotbot.engine import _base_matches, _short
     from spotbot.journal import note_quote
     from spotbot.liquidity import volume_ratio_bps
-    from spotbot.mexc import MexcError, _base_atoms, _order_id_text, positive_int, ticker_price
+    from spotbot.kucoin import KucoinError, _base_atoms, _order_id_text, positive_int, ticker_price
     from spotbot.ops_http import _quotes
 
     monkeypatch.delenv("SPOT_LIVE", raising=False)
@@ -2538,13 +2540,13 @@ def test_a_long_order_id_is_not_read(monkeypatch, tmp_path) -> None:
         raise AssertionError("a digit-only pair must not load")
     try:
         _order_id_text(10**40)
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "1" + "0" * 40 not in str(exc)
     else:
         raise AssertionError("a huge order id must not be read")
     try:
         _base_atoms("z" * 200)
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "z" * 200 not in str(exc)
     else:
         raise AssertionError("a long quantity must not be copied into the error")
@@ -2553,7 +2555,7 @@ def test_a_long_order_id_is_not_read(monkeypatch, tmp_path) -> None:
     assert _base_matches("2USDT", "2") is False
     try:
         ticker_price({}, "Z" * 80)
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "Z" * 80 not in str(exc)
     else:
         raise AssertionError("a long pair name must not be copied into the error")
@@ -2561,7 +2563,7 @@ def test_a_long_order_id_is_not_read(monkeypatch, tmp_path) -> None:
     assert volume_ratio_bps(None) is None
     try:
         positive_int(True, "q" * 90)
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "value" in str(exc)
         assert "q" * 90 not in str(exc)
     else:
@@ -2570,10 +2572,10 @@ def test_a_long_order_id_is_not_read(monkeypatch, tmp_path) -> None:
     saved = (tmp_path / "ops_quotes.json").read_text(encoding="utf-8")
     assert "unreadable" in saved and "z" * 200 not in saved
     (tmp_path / "ops_quotes.json").write_text(
-        '{"BTCUSDT": {"mexc": "%s"}}' % ("m" * 300),
+        '{"BTCUSDT": {"kucoin": "%s"}}' % ("m" * 300),
         encoding="utf-8",
     )
-    shown = _quotes(tmp_path)["BTCUSDT"]["mexc"]
+    shown = _quotes(tmp_path)["BTCUSDT"]["kucoin"]
     assert len(shown) == 180
 
 
@@ -2586,7 +2588,7 @@ def test_a_raw_quote_price_is_text(tmp_path) -> None:
         json.dumps(
             {
                 "BTCUSDT": {
-                    "mexc": 100_000 * 1_000_000_000_000,
+                    "kucoin": 100_000 * 1_000_000_000_000,
                     "binance": "unreadable",
                     "bybit": "-",
                     "okx": 0,
@@ -2599,7 +2601,7 @@ def test_a_raw_quote_price_is_text(tmp_path) -> None:
     )
     shown = _quotes(tmp_path)["BTCUSDT"]
     assert isinstance(shown, dict)
-    assert shown["mexc"] == "100000"
+    assert shown["kucoin"] == "100000"
     assert shown["binance"] == "не читается"
     assert shown["bybit"] == "-"
     assert shown["okx"] == "не читается"
@@ -2610,7 +2612,7 @@ def test_a_raw_quote_price_is_text(tmp_path) -> None:
 def test_a_full_disk_is_not_another_process() -> None:
     import errno
 
-    from spotbot.mexc import DecimalChange, MexcClient, MexcError, rank_liquid
+    from spotbot.kucoin import DecimalChange, KucoinClient, KucoinError, rank_liquid
     from spotbot.ops_http import _ops_path
     from spotbot.signals import band_reclaim, entry_signal, rsi
     from spotbot.state import _lock_held_by_other
@@ -2619,10 +2621,10 @@ def test_a_full_disk_is_not_another_process() -> None:
     assert _lock_held_by_other(OSError(errno.ENOSPC, "full")) is False
     assert _ops_path("/api/status") == "/api/status"
     assert _ops_path("z" * 300) is None
-    client = MexcClient("", "")
+    client = KucoinClient("", "")
     try:
         client.my_trades("BTCUSDT", order_id="1" * 40)
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "digits" in str(exc)
         assert "1" * 40 not in str(exc)
     else:
@@ -2652,7 +2654,7 @@ def test_a_full_disk_is_not_another_process() -> None:
 def test_a_huge_file_does_not_replace_the_book(tmp_path) -> None:
     from spotbot.exits import exit_reason
     from spotbot.journal import note_event
-    from spotbot.mexc import MexcClient, MexcError, _query, clock_allows
+    from spotbot.kucoin import KucoinClient, KucoinError, _query, clock_allows
     from spotbot.ops_http import _public
     from spotbot.signals import _ema_last
     from spotbot.state import LedgerError, write_atomic
@@ -2668,13 +2670,13 @@ def test_a_huge_file_does_not_replace_the_book(tmp_path) -> None:
     assert (tmp_path / "ops_events.jsonl").exists()
     try:
         _query({str(i): "1" for i in range(17)})
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "wide" in str(exc)
     else:
         raise AssertionError("a wide query must not be sent")
     try:
-        MexcClient("", "").ohlcv("BTCUSDT", "5m", 1_001)
-    except MexcError as exc:
+        KucoinClient("", "").ohlcv("BTCUSDT", "5m", 1_001)
+    except KucoinError as exc:
         assert "large" in str(exc)
     else:
         raise AssertionError("more than 1000 candles must not be requested")
@@ -2838,7 +2840,7 @@ def test_a_wide_book_does_not_ask_the_exchange() -> None:
     from pathlib import Path
 
     from spotbot.engine import _close_positions, _entries_halted, _exit_fees, _roll_guard, _short, _slots_used, trading_day
-    from spotbot.mexc import MexcError, signed_payload
+    from spotbot.kucoin import KucoinError, signed_payload
     from spotbot.rules import RuleError, parse_symbol_rule
     from spotbot.state import Book
 
@@ -2866,7 +2868,7 @@ def test_a_wide_book_does_not_ask_the_exchange() -> None:
     try:
         signed_payload(row, False)
         raise AssertionError("wide ack")
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "wide" in str(exc)
     assert len(_short("e" * 400)) == 180
 
@@ -2874,7 +2876,7 @@ def test_a_wide_book_does_not_ask_the_exchange() -> None:
 def test_a_wide_exchange_answer_is_not_a_price(tmp_path) -> None:
     from spotbot.journal import note_event
     from spotbot.liquidity import candle_lift
-    from spotbot.mexc import MexcClient, MexcError, book_prices, depth_notionals, parse_account, ticker_price
+    from spotbot.kucoin import KucoinClient, KucoinError, book_prices, depth_notionals, parse_account, ticker_price
     from spotbot.rules import RuleError, parse_symbol_rule
 
     wide = {str(i): "1" for i in range(17)}
@@ -2883,51 +2885,51 @@ def test_a_wide_exchange_answer_is_not_a_price(tmp_path) -> None:
     try:
         ticker_price(wide, "BTCUSDT")
         raise AssertionError("wide price")
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "price" in str(exc)
         assert "0" not in str(exc) or "BTCUSDT" in str(exc)
     try:
         book_prices(wide, "BTCUSDT")
         raise AssertionError("wide book")
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "wide" in str(exc)
     try:
         depth_notionals(wide, "BTCUSDT")
         raise AssertionError("wide depth")
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "wide" in str(exc)
     account = {"balances": [{"asset": "USDT", "free": "1", "locked": "0", **{str(i): "1" for i in range(14)}}]}
     try:
         parse_account(account)
         raise AssertionError("wide balance")
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "wide" in str(exc)
         assert "USDT" not in str(exc)
     fat = {"balances": [], **{str(i): 1 for i in range(32)}}
     try:
         parse_account(fat)
         raise AssertionError("wide account")
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "wide" in str(exc)
-    client = MexcClient("", "")
+    client = KucoinClient("", "")
     client._public = lambda *_args, **_kwargs: {str(i): 1 for i in range(9)}
     try:
         client.server_time_ms()
         raise AssertionError("wide time")
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "object" in str(exc)
     client._public = lambda *_args, **_kwargs: {"serverTime": 10**15}
     try:
         client.server_time_ms()
         raise AssertionError("far time")
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "timestamp" in str(exc)
         assert "15" not in str(exc) or len(str(exc)) < 80
-    client._public = lambda *_args, **_kwargs: {str(i): 1 for i in range(17)}
+    client._public = lambda *_args, **_kwargs: {str(i): 1 for i in range(65)}
     try:
         client.symbol_rule("BTCUSDT")
         raise AssertionError("wide info")
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "wide" in str(exc)
     try:
         parse_symbol_rule({"symbol": "BTCUSDT", "filters": [1] * 65})
@@ -2948,7 +2950,7 @@ def test_a_wide_ticker_row_is_not_a_peer(tmp_path) -> None:
     from spotbot.guards import drawdown_blocks, note_pair_stop, pair_locked
     from spotbot.journal import note_event, note_quote
     from spotbot.liquidity import close_position_bps
-    from spotbot.mexc import rank_liquid
+    from spotbot.kucoin import rank_liquid
     from spotbot.oracle import _binance_price, _bybit_price, _okx_price, cheapest_first, deviation_bps, lag_bps
     from spotbot.reconcile import FeeAssetError, split_commission
     from spotbot.state import Book
@@ -3051,7 +3053,7 @@ def test_a_wide_treasury_is_not_a_split(tmp_path) -> None:
     from pathlib import Path
 
     from spotbot.engine import _shown_name
-    from spotbot.mexc import MexcClient, MexcError, _interval_ms
+    from spotbot.kucoin import KucoinClient, KucoinError, _interval_ms
     from spotbot.ops_http import _events, _heartbeat
     from spotbot.sleeves import SleeveError, _open_split, _treasury
 
@@ -3061,21 +3063,21 @@ def test_a_wide_treasury_is_not_a_split(tmp_path) -> None:
     try:
         _interval_ms("m" * 20)
         raise AssertionError("interval")
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "interval" in str(exc)
         assert "m" * 20 not in str(exc)
-    client = MexcClient("k", "s")
+    client = KucoinClient("k", "s")
     client._signed = lambda *_args, **_kwargs: [{str(i): 1 for i in range(33)}]
     try:
         client.my_trades("BTCUSDT")
         raise AssertionError("wide trade")
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "wide" in str(exc)
     client._signed = lambda *_args, **_kwargs: ["nope"]
     try:
         client.my_trades("BTCUSDT")
         raise AssertionError("trade object")
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "object" in str(exc)
     fat = {"funded_micro": 0, "sleeves": ["major", "alt", "meme"]}
     fat.update({str(i): 1 for i in range(7)})
@@ -3152,7 +3154,7 @@ def test_a_huge_log_does_not_start(tmp_path) -> None:
 
 
 def test_a_long_day_is_not_a_guard(tmp_path) -> None:
-    from spotbot.mexc import MexcError, ack_commission, executed_fill, signed_payload, _require_filled
+    from spotbot.kucoin import KucoinError, ack_commission, executed_fill, signed_payload, _require_filled
     from spotbot.money import format_fixed
     from spotbot.state import LedgerError, _guard_day_ok
 
@@ -3170,40 +3172,40 @@ def test_a_long_day_is_not_a_guard(tmp_path) -> None:
     try:
         signed_payload({"orderId": "1", "fills": list(range(129))}, False)
         raise AssertionError("fills")
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "fills" in str(exc)
     assert signed_payload([{"id": "1"}], True) == [{"id": "1"}]
     try:
         signed_payload([{str(i): "1" for i in range(33)}], True)
         raise AssertionError("wide trade")
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "wide" in str(exc)
     try:
         signed_payload(["nope"], True)
         raise AssertionError("trade object")
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "object" in str(exc)
     try:
         executed_fill("nope")
         raise AssertionError("fill")
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "object" in str(exc)
     try:
         _require_filled("nope", "buy")
         raise AssertionError("status")
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "filled" in str(exc)
     try:
         ack_commission("nope", "BTC")
         raise AssertionError("ack")
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "object" in str(exc)
 
 
 def test_a_wide_stop_count_still_locks() -> None:
     from spotbot.engine import _status_text
     from spotbot.guards import marked_equity, note_pair_stop, pair_locked
-    from spotbot.mexc import backoff_sec
+    from spotbot.kucoin import backoff_sec
     from spotbot.oracle import _shown_http
     from spotbot.state import Book
 
@@ -3324,7 +3326,7 @@ def test_a_pair_without_a_lot_does_not_stop_the_median(monkeypatch, capsys) -> N
                 stamp += 300_000
             return found
 
-    monkeypatch.setattr("spotbot.replay_main.MexcClient", _Client)
+    monkeypatch.setattr("spotbot.replay_main.KucoinClient", _Client)
     monkeypatch.setattr("spotbot.replay_main.time.sleep", lambda _sec: None)
     assert main(["--sleeves", "--limit", "160"]) == 0
     out = capsys.readouterr().out
@@ -3352,7 +3354,7 @@ def test_one_positive_half_does_not_open_entries() -> None:
 
 
 def test_an_end_inside_the_latest_window_is_not_a_new_tape(monkeypatch, capsys) -> None:
-    from spotbot.mexc import _row_closed
+    from spotbot.kucoin import _row_closed
     from spotbot.replay_main import main
 
     class _Clock:
@@ -3362,7 +3364,7 @@ def test_an_end_inside_the_latest_window_is_not_a_new_tape(monkeypatch, capsys) 
         def server_time_ms(self) -> int:
             return 2_000_000_000_000
 
-    monkeypatch.setattr("spotbot.replay_main.MexcClient", _Clock)
+    monkeypatch.setattr("spotbot.replay_main.KucoinClient", _Clock)
     assert main(["--symbol", "BTCUSDT", "--limit", "80", "--end-ms", "2000000000000"]) == 2
     assert "overlaps" in capsys.readouterr().err
     assert _row_closed([1_000, "1", "1", "1", "1", "1", 1_299, "1"], 300, 1_300) is True
@@ -3621,7 +3623,7 @@ def test_rsi_entry_refuses_a_heavier_ask_at_the_touch(tmp_path) -> None:
 
 
 def test_a_far_book_level_is_not_the_next_trade() -> None:
-    from spotbot.mexc import depth_notionals
+    from spotbot.kucoin import depth_notionals
 
     near = depth_notionals(
         {"bids": [["100", "1"]], "asks": [["100.01", "1"]], "lastUpdateId": 1},
@@ -3815,12 +3817,12 @@ def test_replay_stop_is_negative_after_fees() -> None:
 
     assert _fill_price([10, 20], [10, 99], 0) == 20
     assert _fill_price(None, [10, 99], 0) == 99
-    from spotbot.mexc import MexcError, _join_klines
+    from spotbot.kucoin import KucoinError, _join_klines
 
     assert len(_join_klines([[1, "a"]], [[2, "b"]], "BTCUSDT")) == 2
     try:
         _join_klines([[2, "a"]], [[2, "b"]], "BTCUSDT")
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "short" in str(exc)
     else:
         raise AssertionError("a page that does not move earlier must not extend the tape")
@@ -4060,14 +4062,14 @@ def test_jump_is_not_a_price() -> None:
 
 
 def test_clock_skew_pauses_live_orders() -> None:
-    from spotbot.mexc import clock_allows
+    from spotbot.kucoin import clock_allows
 
     assert clock_allows(1_000_000, 1_001_000) is True
     assert clock_allows(1_000_000, 1_003_001) is False
     assert clock_allows(1_000_000, 0) is False
 
 
-def test_cheapest_mexc_is_bought_first() -> None:
+def test_cheapest_kucoin_is_bought_first() -> None:
     from spotbot.oracle import cheapest_first
 
     assert cheapest_first([("BTCUSDT", 10), ("ETHUSDT", -4), ("SOLUSDT", -4)]) == [
@@ -4077,7 +4079,7 @@ def test_cheapest_mexc_is_bought_first() -> None:
     ]
 
 
-def test_mexc_lag_blocks_a_rich_buy_and_arms_a_rich_sell() -> None:
+def test_kucoin_lag_blocks_a_rich_buy_and_arms_a_rich_sell() -> None:
     peers = [100_000_000, 100_000_000]
     assert lag_bps(100_000_000, peers) == 0
     assert lag_bps(100_200_000, peers) == 20
@@ -4299,7 +4301,7 @@ def test_absent_order_clears_only_after_three_misses() -> None:
 
 
 def test_exchange_body_must_be_json() -> None:
-    from spotbot.mexc import MexcError, _json_body
+    from spotbot.kucoin import KucoinError, _json_body
 
     class _Body:
         def json(self) -> dict[str, str]:
@@ -4307,40 +4309,40 @@ def test_exchange_body_must_be_json() -> None:
 
     try:
         _json_body(_Body(), "order")
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "not json" in str(exc)
     else:
         raise AssertionError("a broken body must stay an exchange error")
 
 
 def test_exchange_error_code_is_not_an_order() -> None:
-    from spotbot.mexc import MexcError, _reject_exchange_code
+    from spotbot.kucoin import KucoinError, _reject_exchange_code
 
     _reject_exchange_code({"symbol": "BTCUSDT", "status": "FILLED", "orderId": "1"})
     _reject_exchange_code({"code": 200, "symbol": "BTCUSDT"})
     try:
         _reject_exchange_code({"code": -2010, "msg": "Account has insufficient balance"})
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "-2010" in str(exc)
     else:
         raise AssertionError("an exchange error code must not pass as an order")
-    from spotbot.mexc import MexcRateLimit
+    from spotbot.kucoin import KucoinRateLimit
 
     try:
         _reject_exchange_code({"code": 429, "msg": "Too Many Requests"})
-    except MexcRateLimit as exc:
+    except KucoinRateLimit as exc:
         assert "429" in str(exc)
     else:
         raise AssertionError("a rate-limit code in the body must stop the caller")
     try:
         _reject_exchange_code({"code": "418", "msg": "banned"})
-    except MexcRateLimit as exc:
+    except KucoinRateLimit as exc:
         assert "418" in str(exc)
     else:
         raise AssertionError("a ban code in the body must stop the caller")
     try:
         _reject_exchange_code({"code": 403, "msg": "Access Denied"})
-    except MexcRateLimit as exc:
+    except KucoinRateLimit as exc:
         assert exc.retry_after_sec is None
         assert "403" in str(exc)
     else:
@@ -4348,7 +4350,7 @@ def test_exchange_error_code_is_not_an_order() -> None:
 
 
 def test_rate_limit_pause_honors_retry_after() -> None:
-    from spotbot.mexc import MexcError, backoff_sec
+    from spotbot.kucoin import KucoinError, backoff_sec
 
     assert backoff_sec(30, 60) == 60
     assert backoff_sec(180, 60) == 180
@@ -4356,26 +4358,26 @@ def test_rate_limit_pause_honors_retry_after() -> None:
     assert backoff_sec(10**9, 60) == 259_200
     try:
         backoff_sec(30, 0)
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "interval" in str(exc)
     else:
         raise AssertionError("a zero interval must not compute a pause")
 
 
 def test_ten_fail_closed_checks() -> None:
-    from spotbot.mexc import MexcError, book_prices, executed_fill, parse_klines, positive_int
+    from spotbot.kucoin import KucoinError, book_prices, executed_fill, parse_klines, positive_int
     from spotbot.sanity import follows_close
 
     assert positive_int("1700000000000", "server time") == 1_700_000_000_000
     try:
         positive_int(True, "server time")
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "integer" in str(exc)
     else:
         raise AssertionError("a boolean clock must be refused")
     try:
         positive_int(1.5, "server time")
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "integer" in str(exc)
     else:
         raise AssertionError("a fractional clock must be refused")
@@ -4386,13 +4388,13 @@ def test_ten_fail_closed_checks() -> None:
     )[0] > 0
     try:
         book_prices({"bidPrice": "1", "askPrice": "1.01", "bidQty": "0", "askQty": "1"}, "BTCUSDT")
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "empty book" in str(exc)
     else:
         raise AssertionError("a book level with no size must be refused")
     try:
         book_prices({"bidPrice": "0", "askPrice": "0"}, "BTCUSDT")
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "empty book" in str(exc)
     else:
         raise AssertionError("a zero book must be refused")
@@ -4412,21 +4414,21 @@ def test_ten_fail_closed_checks() -> None:
     overlap = [1_500, "1", "1.1", "0.9", "1", "1", 2_500, "10"]
     try:
         parse_klines("BTCUSDT", [row, overlap])
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "out of order" in str(exc)
     else:
         raise AssertionError("a candle that overlaps the previous one must be refused")
     broken = [5_000, "1", "0.5", "0.9", "1", "1", 6_000, "10"]
     try:
         parse_klines("BTCUSDT", [row, broken])
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "range" in str(exc)
     else:
         raise AssertionError("a candle outside its range must be refused")
     backwards = [1_500, "1", "1.1", "0.9", "1", "1", 1_800, "10"]
     try:
         parse_klines("BTCUSDT", [later, backwards])
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "out of order" in str(exc)
     else:
         raise AssertionError("a candle that steps backward must be refused")
@@ -4434,7 +4436,7 @@ def test_ten_fail_closed_checks() -> None:
     assert executed_fill({"executedQty": "0.000", "cummulativeQuoteQty": "1"}) is None
     try:
         executed_fill({"executedQty": "nope", "cummulativeQuoteQty": "1"})
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "not decimal" in str(exc)
     else:
         raise AssertionError("a bad quantity must stay an error")
@@ -4445,9 +4447,9 @@ def test_ten_fail_closed_checks() -> None:
 
 
 def test_named_rows_and_the_trade_list() -> None:
-    from spotbot.mexc import (
-        MexcClient,
-        MexcError,
+    from spotbot.kucoin import (
+        KucoinClient,
+        KucoinError,
         book_prices,
         depth_notionals,
         parse_account,
@@ -4462,13 +4464,13 @@ def test_named_rows_and_the_trade_list() -> None:
             {"symbol": "ETHUSDT", "bidPrice": "1", "askPrice": "1.01", "bidQty": "1", "askQty": "1"},
             "BTCUSDT",
         )
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "not BTCUSDT" in str(exc)
     else:
         raise AssertionError("a book for another pair must be refused")
     try:
         ticker_price({"symbol": "ETHUSDT", "price": "1"}, "BTCUSDT")
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "not BTCUSDT" in str(exc)
     else:
         raise AssertionError("a last price for another pair must be refused")
@@ -4476,11 +4478,11 @@ def test_named_rows_and_the_trade_list() -> None:
     assert _bybit_price({"result": {"list": [{"symbol": "ETHUSDT", "lastPrice": "1"}]}}, "BTCUSDT") is None
     assert _okx_price({"data": [{"instId": "ETH-USDT", "last": "1"}]}, "BTC-USDT") is None
 
-    client = MexcClient("", "", 5)
+    client = KucoinClient("", "", 5)
     client._public = lambda _path, _params: {"symbols": [{"symbol": "ETHUSDT"}]}  # type: ignore[method-assign]
     try:
         client.symbol_rule("BTCUSDT")
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "not BTCUSDT" in str(exc)
     else:
         raise AssertionError("exchangeInfo for another pair must be refused")
@@ -4489,7 +4491,7 @@ def test_named_rows_and_the_trade_list() -> None:
     assert signed_payload([{"id": "1"}], True) == [{"id": "1"}]
     try:
         signed_payload([{"id": "1"}], False)
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "not an object" in str(exc)
     else:
         raise AssertionError("a trade list must not be read as an order")
@@ -4498,27 +4500,27 @@ def test_named_rows_and_the_trade_list() -> None:
     loud = [3_000, "1", "1.1", "0.9", "1", "1", 4_000, "10"]
     try:
         parse_klines("BTCUSDT", [quiet, loud])
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "volume" in str(exc)
     else:
         raise AssertionError("a candle with no quote volume must be refused")
     short = [3_000, "1", "1.1", "0.9", "1", "1", 3_500, "10"]
     try:
         parse_klines("BTCUSDT", [[1_000, "1", "1.1", "0.9", "1", "1", 2_000, "10"], short])
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "interval" in str(exc)
     else:
         raise AssertionError("a candle of another length must be refused")
 
     try:
         depth_notionals({"bids": [["1", "0"]], "asks": [["1.01", "1"]]}, "BTCUSDT")
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "empty depth" in str(exc)
     else:
         raise AssertionError("a depth side with no size must be refused")
     try:
         depth_notionals({"bids": [["2", "1"]], "asks": [["1", "1"]]}, "BTCUSDT")
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "crossed depth" in str(exc)
     else:
         raise AssertionError("a crossed depth must be refused")
@@ -4529,7 +4531,7 @@ def test_named_rows_and_the_trade_list() -> None:
     assert free == 0 and bases["BTC"] == 100_000_000
     try:
         parse_account({"balances": [{"asset": "USDT", "free": "-1", "locked": "0"}]})
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "negative" in str(exc)
     else:
         raise AssertionError("a negative balance must be refused")
@@ -4541,7 +4543,7 @@ def test_band_clock_journal_and_the_day(tmp_path) -> None:
     from spotbot.engine import _now_ms, _now_sec
     from spotbot.guards import drawdown_blocks
     from spotbot.journal import note_quote
-    from spotbot.mexc import rank_liquid
+    from spotbot.kucoin import rank_liquid
     from spotbot.signals import below_lower_band
     from spotbot.state import Book, LedgerError, Position, audit_book
 
@@ -4590,7 +4592,7 @@ def test_band_clock_journal_and_the_day(tmp_path) -> None:
 
 
 def test_treasury_and_a_repeated_market_row(tmp_path) -> None:
-    from spotbot.mexc import MexcClient, MexcError, depth_notionals, parse_account
+    from spotbot.kucoin import KucoinClient, KucoinError, depth_notionals, parse_account
     from spotbot.ops_http import OpsError, _Handler, parse_ops_port
     from spotbot.sleeves import SleeveError, apply_funding
     from spotbot.state import LedgerError, load_book
@@ -4630,17 +4632,17 @@ def test_treasury_and_a_repeated_market_row(tmp_path) -> None:
         raise AssertionError("a broken book must not open")
     assert book_path.read_text(encoding="utf-8") == "{"
 
-    client = MexcClient("", "", 5)
+    client = KucoinClient("", "", 5)
     try:
         client.market_buy_quote("BTCUSDT", 0, "a" * 32)
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "positive size" in str(exc)
     else:
         raise AssertionError("a zero buy must not be sent")
     client._public = lambda _path, _params: {"symbols": [{"symbol": "BTCUSDT"}, {"symbol": "BTCUSDT"}]}  # type: ignore[method-assign]
     try:
         client.symbol_rule("BTCUSDT")
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "more than one" in str(exc)
     else:
         raise AssertionError("two exchangeInfo rows must be refused")
@@ -4648,13 +4650,13 @@ def test_treasury_and_a_repeated_market_row(tmp_path) -> None:
 
     try:
         parse_account({"balances": [{"asset": "BTC", "free": "1", "locked": "0"}, {"asset": "btc", "free": "1", "locked": "0"}]})
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "repeated" in str(exc)
     else:
         raise AssertionError("the same coin twice must not be summed")
     try:
         depth_notionals({"bids": [["1", "1"], ["1", "2"]], "asks": [["2", "1"]]}, "BTCUSDT")
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "repeated" in str(exc)
     else:
         raise AssertionError("the same depth price twice must be refused")
@@ -4683,7 +4685,7 @@ def test_treasury_and_a_repeated_market_row(tmp_path) -> None:
 
 def test_redirects_bools_and_a_missing_field() -> None:
     from spotbot.fees import fee_on
-    from spotbot.mexc import MexcError, depth_notionals
+    from spotbot.kucoin import KucoinError, depth_notionals
     from spotbot.reconcile import order_is_ours
     from spotbot.rules import round_base_atoms, round_quote_micro
     from spotbot.sleeves import SleeveError, split_equal
@@ -4702,7 +4704,7 @@ def test_redirects_bools_and_a_missing_field() -> None:
             {"lastUpdateId": 0, "bids": [["1", "1"]], "asks": [["2", "1"]]},
             "BTCUSDT",
         )
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "update" in str(exc)
     else:
         raise AssertionError("a depth without an update id must be refused")
@@ -4753,7 +4755,7 @@ def test_redirects_bools_and_a_missing_field() -> None:
 
 
 def test_pair_limits_round_up_and_a_zero_fee_is_not_stuck() -> None:
-    from spotbot.mexc import ack_commission
+    from spotbot.kucoin import ack_commission
     from spotbot.rules import parse_symbol_rule
 
     row = {
@@ -4785,7 +4787,7 @@ def test_pair_limits_round_up_and_a_zero_fee_is_not_stuck() -> None:
     zero_cap["maxQuoteAmountMarket"] = "0"
     assert parse_symbol_rule(zero_cap).refuse_reason == "max quote is not positive"
     assert ack_commission({"commission": "0.00000000", "commissionAsset": "USDT"}, "BTC") == (0, 0)
-    from spotbot.mexc import new_client_order_id
+    from spotbot.kucoin import new_client_order_id
 
     assert new_client_order_id("BTCUSDT", "B") != new_client_order_id("BTCUSDT", "B")
 
@@ -4811,7 +4813,7 @@ def test_paper_sell_keeps_dust_below_the_lot() -> None:
 
 
 def test_sell_ack_is_the_fill() -> None:
-    from spotbot.mexc import MexcError, _sell_credit
+    from spotbot.kucoin import KucoinError, _sell_credit
 
     credit, fee, base_fee = _sell_credit(
         {
@@ -4835,23 +4837,23 @@ def test_sell_ack_is_the_fill() -> None:
             },
             "BTC",
         )
-    except MexcError:
+    except KucoinError:
         pass
     else:
         raise AssertionError("a fee in a third coin is not zero")
     try:
         _sell_credit({"cummulativeQuoteQty": "1", "executedQty": "1"}, "BTC")
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "missing" in str(exc)
     else:
         raise AssertionError("a fill with no status is not filled")
-    from spotbot.mexc import _filled_quote
+    from spotbot.kucoin import _filled_quote
     from spotbot.signals import closed_prices
 
     assert _filled_quote({"status": "FILLED", "cummulativeQuoteQty": "3.5"}, "buy") == 3_500_000
     try:
         _filled_quote({"status": "FILLED", "executedQty": "1"}, "buy")
-    except MexcError:
+    except KucoinError:
         pass
     else:
         raise AssertionError("requested quote is not a fill")
@@ -4859,7 +4861,7 @@ def test_sell_ack_is_the_fill() -> None:
     assert closed_prices([10]) == []
     try:
         _sell_credit({"status": "NEW", "cummulativeQuoteQty": "1"}, "BTC")
-    except MexcError:
+    except KucoinError:
         pass
     else:
         raise AssertionError("an unfilled sell must not credit cash")
@@ -5219,7 +5221,7 @@ def test_a_coin_below_the_lot_does_not_raise_the_peak(tmp_path) -> None:
     from spotbot.config import Config
     from spotbot.engine import _close_positions, _now_sec
     from spotbot.guards import marked_equity
-    from spotbot.mexc import MexcError
+    from spotbot.kucoin import KucoinError
     from spotbot.rules import SymbolRule
     from spotbot.state import Book, Position
 
@@ -5236,7 +5238,7 @@ def test_a_coin_below_the_lot_does_not_raise_the_peak(tmp_path) -> None:
 
     class _Down(_Book):
         def book_top(self, _symbol: str) -> tuple[int, int]:
-            raise MexcError("book down")
+            raise KucoinError("book down")
 
     cfg = Config(
         symbols=("BTCUSDT",),
@@ -5275,7 +5277,7 @@ def test_a_late_lot_still_keeps_the_coin_out_of_cash(tmp_path) -> None:
     from spotbot.config import Config
     from spotbot.engine import _close_positions, _now_sec
     from spotbot.guards import marked_equity
-    from spotbot.mexc import MexcError
+    from spotbot.kucoin import KucoinError
     from spotbot.rules import SymbolRule
     from spotbot.state import Book, Position
 
@@ -5287,7 +5289,7 @@ def test_a_late_lot_still_keeps_the_coin_out_of_cash(tmp_path) -> None:
         def symbol_rule(self, symbol: str) -> SymbolRule:
             calls["n"] += 1
             if calls["n"] == 1:
-                raise MexcError("rules")
+                raise KucoinError("rules")
             return SymbolRule(symbol, True, "", 5, 100_000_000, 1, 0, "BTC")
 
         def book_top(self, _symbol: str) -> tuple[int, int]:
@@ -5326,7 +5328,7 @@ def test_an_unread_lot_is_checked_again_before_the_peak(tmp_path) -> None:
     from spotbot.config import Config
     from spotbot.engine import _close_positions, _now_sec
     from spotbot.guards import marked_equity
-    from spotbot.mexc import MexcError
+    from spotbot.kucoin import KucoinError
     from spotbot.rules import SymbolRule
     from spotbot.state import Book, Position
     import spotbot.engine as engine
@@ -5340,7 +5342,7 @@ def test_an_unread_lot_is_checked_again_before_the_peak(tmp_path) -> None:
         def symbol_rule(self, symbol: str) -> SymbolRule:
             calls["n"] += 1
             if calls["n"] == 1:
-                raise MexcError("rules")
+                raise KucoinError("rules")
             return SymbolRule(symbol, True, "", 5, 100_000_000, 1, 0, "BTC")
 
         def book_top(self, _symbol: str) -> tuple[int, int]:
@@ -5383,7 +5385,7 @@ def test_an_unread_lot_is_not_cash(tmp_path) -> None:
     from spotbot.config import Config
     from spotbot.engine import _close_positions
     from spotbot.guards import marked_equity
-    from spotbot.mexc import MexcError
+    from spotbot.kucoin import KucoinError
     from spotbot.rules import SymbolRule
     from spotbot.state import Book, Position
 
@@ -5391,7 +5393,7 @@ def test_an_unread_lot_is_not_cash(tmp_path) -> None:
 
     class _Blind:
         def symbol_rule(self, _symbol: str) -> SymbolRule:
-            raise MexcError("rules")
+            raise KucoinError("rules")
 
         def book_top(self, _symbol: str) -> tuple[int, int]:
             raise AssertionError("an unread lot does not need a bid")
@@ -5691,7 +5693,7 @@ def test_an_empty_book_does_not_pretend_the_book_was_read(tmp_path) -> None:
 def test_rules_lost_on_the_sell_stay_on_the_page(tmp_path) -> None:
     from spotbot.config import Config
     from spotbot.engine import _close_positions, _now_sec
-    from spotbot.mexc import MexcError
+    from spotbot.kucoin import KucoinError
     from spotbot.rules import SymbolRule
     from spotbot.state import Book, Position
 
@@ -5703,7 +5705,7 @@ def test_rules_lost_on_the_sell_stay_on_the_page(tmp_path) -> None:
         def symbol_rule(self, symbol: str) -> SymbolRule:
             calls["n"] += 1
             if calls["n"] >= 3:
-                raise MexcError("rules")
+                raise KucoinError("rules")
             return SymbolRule(symbol, True, "", 5, 1, 1, 0, "BTC")
 
         def book_top(self, _symbol: str) -> tuple[int, int]:
@@ -5841,7 +5843,7 @@ def test_a_locked_coin_stays_on_the_page(tmp_path) -> None:
 def test_an_unread_balance_is_not_called_a_lock(tmp_path) -> None:
     from spotbot.config import Config
     from spotbot.engine import _close_positions, _now_sec
-    from spotbot.mexc import MexcError
+    from spotbot.kucoin import KucoinError
     from spotbot.rules import SymbolRule
     from spotbot.state import Book, Position
 
@@ -5856,7 +5858,7 @@ def test_an_unread_balance_is_not_called_a_lock(tmp_path) -> None:
             return bid, bid + 1
 
         def spot_balances(self) -> tuple[int, int, dict[str, int], dict[str, int]]:
-            raise MexcError("balance")
+            raise KucoinError("balance")
 
         def market_sell_base(self, _symbol: str, _atoms: int, _client_id: str) -> None:
             raise AssertionError("an unread balance is not sold")
@@ -5976,7 +5978,7 @@ def test_a_paper_entry_writes_the_debit_and_the_fee(tmp_path) -> None:
 def test_an_unread_pair_is_not_asked_again_for_the_fee() -> None:
     from spotbot.engine import _exit_fees, _unpriced_why
     from spotbot.guards import marked_equity
-    from spotbot.mexc import MexcError
+    from spotbot.kucoin import KucoinError
     from spotbot.rules import SymbolRule
     from spotbot.state import Book, Position
 
@@ -5996,7 +5998,7 @@ def test_an_unread_pair_is_not_asked_again_for_the_fee() -> None:
 
     class _Refuse:
         def symbol_rule(self, _symbol: str) -> SymbolRule:
-            raise MexcError("rules")
+            raise KucoinError("rules")
 
     alone = Book(cash_micro=1, positions=[unread], realized_micro=0)
     assert _exit_fees(_Refuse(), alone) == {}
@@ -6006,14 +6008,14 @@ def test_an_unsellable_coin_does_not_blank_the_book() -> None:
     from spotbot.engine import _exit_fees, open_loss_micro
     from spotbot.fees import paper_sell
     from spotbot.guards import marked_equity
-    from spotbot.mexc import MexcError
+    from spotbot.kucoin import KucoinError
     from spotbot.rules import SymbolRule
     from spotbot.state import Book, Position
 
     class _Rules:
         def symbol_rule(self, symbol: str) -> SymbolRule:
             if symbol == "BTCUSDT":
-                raise MexcError("rules")
+                raise KucoinError("rules")
             return SymbolRule(symbol, True, "", 5, 1, 1, 0, "ETH")
 
     price = 100_000_000_000_000
@@ -6116,7 +6118,7 @@ def test_new_entries_stay_off_and_exits_still_run(tmp_path, monkeypatch) -> None
 def test_a_rate_limit_does_not_look_like_a_finished_cycle(tmp_path) -> None:
     from spotbot.config import Config
     from spotbot.engine import run_cycle
-    from spotbot.mexc import MexcRateLimit
+    from spotbot.kucoin import KucoinRateLimit
     from spotbot.rules import SymbolRule
     from spotbot.state import Book, Position, save_book
 
@@ -6140,7 +6142,7 @@ def test_a_rate_limit_does_not_look_like_a_finished_cycle(tmp_path) -> None:
             return SymbolRule(symbol, True, "", 5, 1, 1, 0, "BTC")
 
         def book_top(self, _symbol: str) -> tuple[int, int]:
-            raise MexcRateLimit("429")
+            raise KucoinRateLimit("429")
 
     cfg = Config(
         symbols=("BTCUSDT",),
@@ -6165,7 +6167,7 @@ def test_a_rate_limit_does_not_look_like_a_finished_cycle(tmp_path) -> None:
     )
     try:
         run_cycle(cfg, _Limited(), path)
-    except MexcRateLimit as exc:
+    except KucoinRateLimit as exc:
         assert "429" in str(exc)
     else:
         raise AssertionError("a rate limit must leave the cycle unfinished")
@@ -6183,7 +6185,7 @@ def test_a_rate_limit_does_not_look_like_a_finished_cycle(tmp_path) -> None:
 
 def test_rate_limit_does_not_start_the_next_sleeve(tmp_path, monkeypatch) -> None:
     from spotbot.config import Config
-    from spotbot.mexc import MexcError, MexcRateLimit
+    from spotbot.kucoin import KucoinError, KucoinRateLimit
     from spotbot.sleeves import run_sleeves
 
     calls: list[str] = []
@@ -6191,7 +6193,7 @@ def test_rate_limit_does_not_start_the_next_sleeve(tmp_path, monkeypatch) -> Non
     def _cycle(cfg: Config, client: object, path: object, book_name: str = "", sibling_paths: tuple[object, ...] = ()) -> None:
         calls.append(book_name)
         if book_name == "major":
-            raise MexcRateLimit("429")
+            raise KucoinRateLimit("429")
         raise AssertionError(f"{book_name} must wait")
 
     monkeypatch.setattr("spotbot.sleeves.run_cycle", _cycle)
@@ -6218,7 +6220,7 @@ def test_rate_limit_does_not_start_the_next_sleeve(tmp_path, monkeypatch) -> Non
     )
     try:
         run_sleeves(cfg, object(), tmp_path)
-    except MexcRateLimit as exc:
+    except KucoinRateLimit as exc:
         assert "429" in str(exc)
     else:
         raise AssertionError("a rate limit must stop the remaining sleeves")
@@ -6229,7 +6231,7 @@ def test_rate_limit_does_not_start_the_next_sleeve(tmp_path, monkeypatch) -> Non
     def _continue(cfg: Config, client: object, path: object, book_name: str = "", sibling_paths: tuple[object, ...] = ()) -> None:
         calls.append(book_name)
         if book_name == "major":
-            raise MexcError("rules down")
+            raise KucoinError("rules down")
 
     monkeypatch.setattr("spotbot.sleeves.run_cycle", _continue)
     run_sleeves(cfg, object(), tmp_path)
@@ -6339,7 +6341,7 @@ def test_a_missing_sleeve_is_not_rebuilt_from_the_main_balance(tmp_path) -> None
 def test_rate_limit_stops_the_cycle_and_keeps_the_book(tmp_path) -> None:
     from spotbot.config import Config
     from spotbot.engine import run_cycle
-    from spotbot.mexc import MexcRateLimit
+    from spotbot.kucoin import KucoinRateLimit
     from spotbot.rules import SymbolRule
     from spotbot.state import Book, Position, load_book, save_book
 
@@ -6355,7 +6357,7 @@ def test_rate_limit_stops_the_cycle_and_keeps_the_book(tmp_path) -> None:
 
         def book_top(self, symbol: str) -> tuple[int, int]:
             seen.append(symbol)
-            raise MexcRateLimit("429")
+            raise KucoinRateLimit("429")
 
         def klines(self, _symbol: str) -> list[int]:
             raise AssertionError("a rate limit must not start the entry scan")
@@ -6395,7 +6397,7 @@ def test_rate_limit_stops_the_cycle_and_keeps_the_book(tmp_path) -> None:
     )
     try:
         run_cycle(cfg, _Limit(), path)
-    except MexcRateLimit as exc:
+    except KucoinRateLimit as exc:
         assert "429" in str(exc)
     else:
         raise AssertionError("a rate limit must leave the cycle after the book is saved")
@@ -6541,10 +6543,10 @@ def test_ops_page_answers_on_its_own_port(tmp_path) -> None:
 def test_replay_signal_uses_the_cycle_window() -> None:
     import inspect
 
-    from spotbot.mexc import KLINE_LIMIT, MexcClient
+    from spotbot.kucoin import KLINE_LIMIT, KucoinClient
     from spotbot.replay import _signal_closes
 
-    assert inspect.signature(MexcClient.klines).parameters["limit"].default == KLINE_LIMIT
+    assert inspect.signature(KucoinClient.klines).parameters["limit"].default == KLINE_LIMIT
     closes = list(range(1, 400))
     window = _signal_closes(closes, len(closes) - 1)
     assert len(window) == KLINE_LIMIT - 1
@@ -6553,9 +6555,9 @@ def test_replay_signal_uses_the_cycle_window() -> None:
 
 
 def test_klines_returns_the_close_not_the_quote_volume() -> None:
-    from spotbot.mexc import MexcClient
+    from spotbot.kucoin import KucoinClient
 
-    client = MexcClient("", "")
+    client = KucoinClient("", "")
     client.ohlcv = lambda *_args, **_kwargs: [  # type: ignore[method-assign]
         (10, 12, 8, 11, 5_000_000),
         (10, 12, 8, 14, 9_000_000),
@@ -6582,7 +6584,7 @@ def test_lift_candle_replay_loses_on_the_stop() -> None:
 
 
 def test_account_must_match_the_book() -> None:
-    from spotbot.mexc import parse_account
+    from spotbot.kucoin import parse_account
     from spotbot.reconcile import base_is_free, inventory_mismatch
 
     usdt, free_usdt, bases, free_bases = parse_account(
@@ -6607,7 +6609,7 @@ def test_account_must_match_the_book() -> None:
     assert inventory_mismatch([], {"BTC": 1_000_000, "DOGE": 5}, [("BTCUSDT", 1_000_000)]) is not None
     assert base_is_free(1_000_000, 1_000_000) is True
     assert base_is_free(1_000_000, 2_000_000) is False
-    from spotbot.mexc import MexcError
+    from spotbot.kucoin import KucoinError
 
     try:
         parse_account(
@@ -6618,19 +6620,19 @@ def test_account_must_match_the_book() -> None:
                 ]
             }
         )
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "repeated" in str(exc)
     else:
         raise AssertionError("the same coin twice must not be summed")
     try:
         parse_account({"balances": ["BTC"]})
-    except MexcError:
+    except KucoinError:
         pass
     else:
         raise AssertionError("a broken balance row is not an empty account")
     try:
         parse_account({"balances": [{"asset": "", "free": "1", "locked": "0"}]})
-    except MexcError:
+    except KucoinError:
         pass
     else:
         raise AssertionError("a nameless balance is not zero")
@@ -6646,7 +6648,7 @@ def test_live_spend_stops_at_free_usdt() -> None:
 
 
 def test_canceled_partial_keeps_the_rest() -> None:
-    from spotbot.mexc import MexcError, executed_fill
+    from spotbot.kucoin import KucoinError, executed_fill
     from spotbot.reconcile import order_finished
     from spotbot.state import Book, Position, record_sell_fill
 
@@ -6655,13 +6657,13 @@ def test_canceled_partial_keeps_the_rest() -> None:
     assert executed_fill({"executedQty": "0", "cummulativeQuoteQty": "0"}) is None
     try:
         executed_fill({"executedQty": "1", "cummulativeQuoteQty": "0"})
-    except MexcError:
+    except KucoinError:
         pass
     else:
         raise AssertionError("a positive quantity with a zero quote is not an empty fill")
     try:
         executed_fill({"executedQty": "nope", "cummulativeQuoteQty": "1"})
-    except MexcError:
+    except KucoinError:
         pass
     else:
         raise AssertionError("an unreadable quantity is not an empty fill")
@@ -7117,7 +7119,7 @@ def test_partial_fill_moves_cash_once() -> None:
 def test_live_partial_sell_keeps_the_rest(tmp_path, monkeypatch) -> None:
     from spotbot.config import Config
     from spotbot.engine import _close_positions
-    from spotbot.mexc import OrderFill
+    from spotbot.kucoin import OrderFill
     from spotbot.rules import SymbolRule
     from spotbot.state import Book, Position
 
@@ -7246,7 +7248,7 @@ def test_live_partial_sell_keeps_the_rest(tmp_path, monkeypatch) -> None:
 def test_pending_sell_blocks_the_other_coin(tmp_path, monkeypatch) -> None:
     from spotbot.config import Config
     from spotbot.engine import _close_positions
-    from spotbot.mexc import MexcError
+    from spotbot.kucoin import KucoinError
     from spotbot.rules import SymbolRule
     from spotbot.state import Book, Position
 
@@ -7269,7 +7271,7 @@ def test_pending_sell_blocks_the_other_coin(tmp_path, monkeypatch) -> None:
 
         def market_sell_base(self, symbol: str, _base_atoms: int, _client_order_id: str) -> None:
             calls.append(symbol)
-            raise MexcError("ack lost")
+            raise KucoinError("ack lost")
 
     cfg = Config(
         symbols=("BTCUSDT", "ETHUSDT"),
@@ -7323,7 +7325,7 @@ def test_pending_sell_blocks_the_other_coin(tmp_path, monkeypatch) -> None:
 def test_sibling_pending_blocks_this_book(tmp_path, monkeypatch) -> None:
     from spotbot.config import Config
     from spotbot.engine import run_cycle, sibling_pending
-    from spotbot.mexc import MexcError
+    from spotbot.kucoin import KucoinError
     from spotbot.rules import SymbolRule
     from spotbot.state import Book, Position, remember_pending, save_book
 
@@ -7351,7 +7353,7 @@ def test_sibling_pending_blocks_this_book(tmp_path, monkeypatch) -> None:
             return SymbolRule(symbol, True, "", 5, 1, 1_000_000, 0, symbol[:-4])
 
         def server_time_ms(self) -> int:
-            raise MexcError("time unread")
+            raise KucoinError("time unread")
 
         def price(self, _symbol: str) -> int:
             return 50_000_000
@@ -7399,7 +7401,7 @@ def test_unresolved_order_blocks_the_next_buy() -> None:
 
     from spotbot.config import Config
     from spotbot.engine import _apply_progress, _try_buy
-    from spotbot.mexc import MexcError
+    from spotbot.kucoin import KucoinError
     from spotbot.state import Book, remember_pending
 
     book = Book(cash_micro=20_000_000, positions=[], realized_micro=0)
@@ -7435,7 +7437,7 @@ def test_unresolved_order_blocks_the_next_buy() -> None:
 
     class _FeeDown:
         def my_trades(self, _symbol: str, order_id: str = "") -> list[object]:
-            raise MexcError("trades unread")
+            raise KucoinError("trades unread")
 
     assert _apply_progress(_FeeDown(), book, {"orderId": "9"}, 50_000_000, 5_000_000, 100_000_000) is False
     assert book.positions == []
@@ -7537,14 +7539,14 @@ def test_base_fee_is_not_kept_as_coins() -> None:
 def test_paper_sell_stays_when_rules_are_down(tmp_path, monkeypatch) -> None:
     from spotbot.config import Config
     from spotbot.engine import _close_positions
-    from spotbot.mexc import MexcError
+    from spotbot.kucoin import KucoinError
     from spotbot.state import Book, Position
 
     monkeypatch.setattr("spotbot.engine.venue_quotes", lambda _symbol: {})
 
     class _Client:
         def symbol_rule(self, _symbol: str) -> None:
-            raise MexcError("exchangeInfo down")
+            raise KucoinError("exchangeInfo down")
 
         def price(self, _symbol: str) -> int:
             return 60_000_000
@@ -7587,23 +7589,23 @@ def test_paper_sell_stays_when_rules_are_down(tmp_path, monkeypatch) -> None:
 
 
 def test_bad_market_number_stays_an_exchange_error() -> None:
-    from spotbot.mexc import MexcClient, MexcError, _filled_quote
+    from spotbot.kucoin import KucoinClient, KucoinError, _filled_quote
     from spotbot.reconcile import FeeAssetError, split_commission
 
-    client = MexcClient("", "")
+    client = KucoinClient("", "")
     client._public = lambda _path, _params: [
         [0, "1", "1", "1", "1", "1", 0, "1"],
         [0, "nope", "1", "1", "1", "1", 0, "1"],
     ]
     try:
         client.ohlcv("BTCUSDT")
-    except MexcError as exc:
+    except KucoinError as exc:
         assert "bad kline" in str(exc)
     else:
         raise AssertionError("a bad candle must not escape as a raw number error")
     try:
         _filled_quote({"cummulativeQuoteQty": "nope"}, "buy")
-    except MexcError:
+    except KucoinError:
         pass
     else:
         raise AssertionError("a bad fill quote must stay an exchange error")
@@ -7774,7 +7776,7 @@ def test_sell_remainder_stays_until_the_fill_is_honest(tmp_path) -> None:
     assert apply_buy_progress(capped, "BTCUSDT", 100_000_000, 50_000_000, 5_000_001, 0, "recovered", "abc", "1") is False
     assert apply_buy_progress(capped, "BTCUSDT", 100_000_000, 50_000_000, 5_000_000, 0, "recovered", "abc", "nope") is False
     assert capped.cash_micro == 20_000_000
-    assert record_buy(capped, "BTCUSDT", 100_000_000, 1, 1, 0, "test", "abc", "e1") is False
+    assert record_buy(capped, "BTCUSDT", 100_000_000, 1, 1, 0, "test", "abc", "zz") is False
     wide = Book(
         cash_micro=0,
         positions=[
@@ -7872,7 +7874,7 @@ def test_sell_remainder_stays_until_the_fill_is_honest(tmp_path) -> None:
     else:
         raise AssertionError("a trade row without a symbol must not close a fee")
 
-    from spotbot.mexc import MexcError
+    from spotbot.kucoin import KucoinError
     from spotbot.reconcile import inventory_mismatch, pending_gone
     from spotbot.sleeves import sleeve_symbols
 
@@ -7916,7 +7918,7 @@ def test_sell_remainder_stays_until_the_fill_is_honest(tmp_path) -> None:
 
     class _Missing:
         def order_by_client(self, _symbol: str, _client_id: str) -> dict[str, str]:
-            raise MexcError("Order does not exist.")
+            raise KucoinError("Order does not exist.")
 
     acked = Book(cash_micro=1, positions=[], realized_micro=0)
     remember_pending(acked, "sell1", "BTCUSDT", "SELL", 50_000_000)

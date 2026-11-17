@@ -12,7 +12,7 @@ from spotbot.fees import paper_sell
 from spotbot.money import notional_micro
 from spotbot.rules import budget_micro, plan_paper_buy
 from spotbot.sanity import follows_close, mark_ok, price_ok, slip_price
-from spotbot.mexc import KLINE_LIMIT
+from spotbot.kucoin import KLINE_LIMIT
 from spotbot.liquidity import candle_lift, prior_bar_pays, range_pays
 from spotbot.signals import entry_signal, mean_pays, reclaim_still, rise_pays
 

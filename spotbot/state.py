@@ -17,16 +17,17 @@ from spotbot.money import MoneyError, implied_price_micro
 _MAX_BOOK = 10**24
 
 _CLIENT_ID = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
+_EXCHANGE_ORDER_ID = re.compile(r"^[A-Fa-f0-9]{1,32}$")
 
 
 def client_id_ok(value: str) -> bool:
-    """MEXC client ids are 1–32 letters, digits, underscores, or hyphens."""
+    """KuCoin client ids are 1–32 letters, digits, underscores, or hyphens."""
     return isinstance(value, str) and _CLIENT_ID.fullmatch(value) is not None
 
 
 def exchange_order_id_ok(value: str) -> bool:
-    """An exchange order id, when the ack has one, is a digit string."""
-    return isinstance(value, str) and value.isdigit() and 1 <= len(value) <= 32
+    """An exchange order id, when the ack has one, is letters and digits (KuCoin hex ids)."""
+    return isinstance(value, str) and _EXCHANGE_ORDER_ID.fullmatch(value) is not None
 
 
 @dataclass

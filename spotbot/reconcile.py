@@ -112,7 +112,9 @@ def order_missing(message: str) -> bool:
     text = message.lower()
     if "order does not exist" in text or "unknown order" in text:
         return True
-    return _has_code(text, "-2011") or _has_code(text, "-2013")
+    if "order not exist" in text or "order_not_exist" in text:
+        return True
+    return _has_code(text, "-2011") or _has_code(text, "-2013") or _has_code(text, "400100")
 
 
 def pending_gone(misses: int, applied_atoms: int, has_fill: bool, acked: bool = False) -> bool:
@@ -202,7 +204,7 @@ def split_commission(
         raise FeeAssetError("commission needs an order, a base asset, and a side")
     if not order_id or not base_asset or side not in ("BUY", "SELL"):
         raise FeeAssetError("commission needs an order, a base asset, and a side")
-    if not order_id.isdigit() or len(order_id) > 32:
+    if len(order_id) > 32 or any(ch not in "0123456789abcdefABCDEF" for ch in order_id):
         raise FeeAssetError("trade order id is not digits")
     if len(base_asset) > 10 or not base_asset.isalnum() or not base_asset.isupper():
         raise FeeAssetError("commission base asset is not a coin name")
@@ -250,7 +252,7 @@ def split_commission(
         if not isinstance(trade_raw, str):
             raise FeeAssetError("trade id is not digits")
         trade_id = trade_raw
-        if len(trade_id) > 32 or not trade_id.isdigit():
+        if len(trade_id) > 32 or any(ch not in "0123456789abcdefABCDEF" for ch in trade_id):
             raise FeeAssetError("trade id is not digits")
         if trade_id in seen_ids:
             raise FeeAssetError("trade id is repeated")
@@ -331,7 +333,11 @@ def split_commission(
 
 def usdt_commission(trades: list[object], order_id: str) -> int:
     """Sum USDT commission rows for one exchange order. Other assets are ignored."""
-    if not isinstance(order_id, str) or len(order_id) > 32 or not order_id.isdigit():
+    if (
+        not isinstance(order_id, str)
+        or len(order_id) > 32
+        or any(ch not in "0123456789abcdefABCDEF" for ch in order_id)
+    ):
         raise FeeAssetError("trade order id is not digits")
     if len(trades) > 5_000:
         raise FeeAssetError("trade list is too large")

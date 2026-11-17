@@ -15,7 +15,7 @@ from pathlib import Path
 from spotbot.config import Config
 from spotbot.engine import run_cycle
 from spotbot.journal import note_event, ops_root
-from spotbot.mexc import MexcClient, MexcError, MexcRateLimit
+from spotbot.kucoin import KucoinClient, KucoinError, KucoinRateLimit
 from spotbot.money import format_usdt
 from spotbot.state import Book, LedgerError, load_book, save_book, structure_too_deep, usdt_symbol_ok, write_atomic
 
@@ -239,7 +239,7 @@ def apply_funding(data_dir: Path, main_micro: int, live: bool = False) -> tuple[
     return tuple(parts)
 
 
-def run_sleeves(cfg: Config, client: MexcClient, data_dir: Path) -> None:
+def run_sleeves(cfg: Config, client: KucoinClient, data_dir: Path) -> None:
     """One pass over major, alt, then meme. Books do not share cash."""
     if cfg.live:
         LOG.warning("live sleeves are not funded from the paper balance")
@@ -263,10 +263,10 @@ def run_sleeves(cfg: Config, client: MexcClient, data_dir: Path) -> None:
         LOG.info("sleeve=%s symbols=%s", sleeve.name, ",".join(sleeve.symbols))
         try:
             run_cycle(child, client, path, book_name=sleeve.name, sibling_paths=siblings)
-        except MexcRateLimit:
+        except KucoinRateLimit:
             LOG.error("sleeve %s stopped on rate limit; the other sleeves wait", sleeve.name)
             raise
-        except MexcError as exc:
+        except KucoinError as exc:
             LOG.error("sleeve %s failed closed: %s", sleeve.name, str(exc)[:180])
         except LedgerError as exc:
             LOG.error("sleeve %s book was not read; the other sleeves still run: %s", sleeve.name, str(exc)[:180])

@@ -10,7 +10,7 @@ import argparse
 import sys
 import time
 
-from spotbot.mexc import MexcClient, MexcError, MexcRateLimit
+from spotbot.kucoin import KucoinClient, KucoinError, KucoinRateLimit
 from spotbot.rules import RuleError
 from spotbot.money import format_price, format_usdt, parse_micro
 from spotbot.replay import ReplayResult, hold_net, holdout_cut, median_micro, replay_closes, replay_lift_bars
@@ -22,7 +22,7 @@ SPREAD_SLIP_BPS = 30
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Replay RSI exits on MEXC 5m candles")
+    parser = argparse.ArgumentParser(description="Replay RSI exits on KuCoin 5m candles")
     parser.add_argument("--symbol", default="BTCUSDT")
     parser.add_argument("--limit", type=int, default=500)
     parser.add_argument("--sleeves", action="store_true", help="replay the fixed 14 pairs and print the median")
@@ -55,14 +55,14 @@ def main(argv: list[str] | None = None) -> int:
     earlier_lift: list[tuple[str, int]] = []
     zero_fee: list[str] = []
     left_out: list[str] = []
-    client = MexcClient()
+    client = KucoinClient()
     if args.end_ms:
         try:
             latest_open = client.server_time_ms() - args.limit * 300_000
-        except MexcRateLimit as exc:
+        except KucoinRateLimit as exc:
             print(f"replay stopped on rate limit: {exc}", file=sys.stderr)
             return 1
-        except MexcError as exc:
+        except KucoinError as exc:
             print(f"replay failed: clock {exc}", file=sys.stderr)
             return 1
         if args.end_ms > latest_open:
@@ -88,13 +88,13 @@ def main(argv: list[str] | None = None) -> int:
             if len(stamped) >= 2:
                 stamped = stamped[:-1]
             if len(stamped) < 2:
-                raise MexcError(f"no klines for {symbol}")
+                raise KucoinError(f"no klines for {symbol}")
             minutes = client.klines_between(symbol, "1m", stamped[0][0], stamped[-1][0] + 300_000)
-        except MexcRateLimit as exc:
+        except KucoinRateLimit as exc:
             print(f"replay stopped on rate limit: {exc}", file=sys.stderr)
             print("median refused: the tape is incomplete")
             return 1
-        except (MexcError, RuleError) as exc:
+        except (KucoinError, RuleError) as exc:
             if not args.sleeves:
                 print(f"replay failed: {symbol} {exc}", file=sys.stderr)
                 return 1

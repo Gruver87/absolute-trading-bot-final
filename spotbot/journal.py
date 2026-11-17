@@ -51,7 +51,7 @@ def note_event(data_dir: Path, **fields: object) -> None:
 def note_quote(
     data_dir: Path,
     symbol: str,
-    mexc: str,
+    kucoin: str,
     binance: str,
     bybit: str,
     okx: str,
@@ -60,7 +60,7 @@ def note_quote(
 ) -> None:
     if not isinstance(symbol, str) or not symbol or len(symbol) > 32:
         return
-    venues = (_venue_text(mexc), _venue_text(binance), _venue_text(bybit), _venue_text(okx))
+    venues = (_venue_text(kucoin), _venue_text(binance), _venue_text(bybit), _venue_text(okx))
     lag = _small_bps(lag_bps)
     width = _small_bps(width_bps)
     try:
@@ -81,7 +81,7 @@ def note_quote(
                     }
             raw[symbol] = {
                 "at": _now(),
-                "mexc": venues[0],
+                "kucoin": venues[0],
                 "binance": venues[1],
                 "bybit": venues[2],
                 "okx": venues[3],

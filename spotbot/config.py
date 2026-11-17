@@ -34,11 +34,13 @@ class Config:
     symbol_lock: bool
     api_key: str
     api_secret: str
+    api_passphrase: str = ""
     drawdown_bps: int = 1_000
     stop_lock_count: int = 3
     stop_lock_sec: int = 14_400
     spread_bps: int = 30
     entries: bool = False
+    api_key_version: str = "2"
 
 
 def require_cycle_config(cfg: Config) -> None:
@@ -50,9 +52,16 @@ def require_cycle_config(cfg: Config) -> None:
             raise ConfigError("symbols are not USDT pairs")
     if not isinstance(cfg.live, bool) or not isinstance(cfg.symbol_lock, bool) or not isinstance(cfg.entries, bool):
         raise ConfigError("live, entries, and the pair lock must be on or off")
-    if not isinstance(cfg.api_key, str) or not isinstance(cfg.api_secret, str):
+    if not isinstance(cfg.api_key, str) or not isinstance(cfg.api_secret, str) or not isinstance(cfg.api_passphrase, str):
         raise ConfigError("api key must be text")
-    if len(cfg.api_key) > 256 or len(cfg.api_secret) > 256 or any(ch in cfg.api_key or ch in cfg.api_secret for ch in "\r\n\x00"):
+    if not isinstance(cfg.api_key_version, str) or cfg.api_key_version not in ("1", "2"):
+        raise ConfigError("API key version must be 1 or 2")
+    if (
+        len(cfg.api_key) > 256
+        or len(cfg.api_secret) > 256
+        or len(cfg.api_passphrase) > 256
+        or any(ch in cfg.api_key or ch in cfg.api_secret or ch in cfg.api_passphrase for ch in "\r\n\x00")
+    ):
         raise ConfigError("API key is not a single line")
     if cfg.mode not in ("rsi", "liquidity"):
         raise ConfigError("mode must be rsi or liquidity")
@@ -157,12 +166,18 @@ def load_config(live_flag: bool, mode: str | None = None) -> Config:
     interval = _env_int("SPOT_INTERVAL_SEC", "60", 15, 86_400)
     env_live = os.environ.get("SPOT_LIVE", "0") == "1"
     live = live_flag and env_live
-    key = os.environ.get("MEXC_API_KEY", "").strip()
-    secret = os.environ.get("MEXC_API_SECRET", "").strip()
-    if any(ch in key or ch in secret for ch in "\r\n\x00"):
+    key = os.environ.get("KUCOIN_API_KEY", "").strip()
+    secret = os.environ.get("KUCOIN_API_SECRET", "").strip()
+    passphrase = os.environ.get("KUCOIN_API_PASSPHRASE", "").strip()
+    key_version = os.environ.get("KUCOIN_API_KEY_VERSION", "2").strip() or "2"
+    if any(ch in key or ch in secret or ch in passphrase for ch in "\r\n\x00"):
         raise ConfigError("API key is not a single line")
-    if live and (not key or not secret):
-        raise ConfigError("live mode needs MEXC_API_KEY and MEXC_API_SECRET in the environment")
+    if key_version not in ("1", "2"):
+        raise ConfigError("KUCOIN_API_KEY_VERSION must be 1 or 2")
+    if live and (not key or not secret or not passphrase):
+        raise ConfigError(
+            "live mode needs KUCOIN_API_KEY, KUCOIN_API_SECRET, and KUCOIN_API_PASSPHRASE in the environment"
+        )
     if live_flag and not env_live:
         raise ConfigError("refusing --live without SPOT_LIVE=1")
     chosen = (mode or os.environ.get("SPOT_MODE", "rsi")).strip().lower()
@@ -202,11 +217,13 @@ def load_config(live_flag: bool, mode: str | None = None) -> Config:
         symbol_lock=False,
         api_key=key,
         api_secret=secret,
+        api_passphrase=passphrase,
         drawdown_bps=drawdown_bps,
         stop_lock_count=stop_lock_count,
         stop_lock_sec=stop_lock_sec,
         spread_bps=spread_bps,
         entries=entries,
+        api_key_version=key_version,
     )
     require_cycle_config(built)
     return built

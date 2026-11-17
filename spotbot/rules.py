@@ -1,4 +1,4 @@
-"""Per-symbol rules from MEXC exchangeInfo. No network in this module.
+"""Per-symbol rules from KuCoin exchangeInfo. No network in this module.
 
 A pair is tradable when spot is enabled, it is not an ST tag, and it is not
 on an assessment plate. The taker fee is the symbol's own rate.
@@ -233,6 +233,9 @@ def _taker_bps(raw: object) -> int:
 
 
 def _step_atoms(raw: object) -> tuple[int, str]:
+    """Lot step in base atoms. KuCoin baseIncrement can be finer than 1e-6."""
+    from decimal import Decimal, InvalidOperation, ROUND_DOWN
+
     if raw is None or (isinstance(raw, str) and raw.strip() == ""):
         return 0, "base step is missing"
     try:
@@ -242,10 +245,12 @@ def _step_atoms(raw: object) -> tuple[int, str]:
     if text in ("0", "0.0", "0.00"):
         return 0, "base step is missing"
     try:
-        micro = to_satoshi(text)
-    except MoneyError:
+        value = Decimal(text)
+    except (InvalidOperation, ValueError):
         return 0, "base step is not decimal"
-    atoms = micro * (BASE_ATOMS // MICRO)
+    if not value.is_finite() or value <= 0:
+        return 0, "base step is missing"
+    atoms = int((value * Decimal(BASE_ATOMS)).to_integral_value(rounding=ROUND_DOWN))
     if atoms <= 0:
         return 0, "base step is missing"
     if atoms >= 10**24:
@@ -277,7 +282,7 @@ def _price_tick(raw: object) -> tuple[int, str]:
 
 
 def _quote_step(raw: object) -> tuple[int, str]:
-    """Market quote minimum. MEXC also uses this value as the quote step."""
+    """Market quote minimum. KuCoin also uses this value as the quote step."""
     if raw is None or (isinstance(raw, str) and raw.strip() == ""):
         return 0, "market min quote missing"
     try:

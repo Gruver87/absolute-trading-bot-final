@@ -429,7 +429,7 @@ def _show_quote(value: object) -> object:
     shown = _public(value)
     if not isinstance(shown, dict):
         return shown
-    for key in ("mexc", "binance", "bybit", "okx"):
+    for key in ("kucoin", "binance", "bybit", "okx"):
         if key in shown:
             shown[key] = _quote_price(shown[key])
     for key in ("lag_bps", "width_bps"):
@@ -647,14 +647,14 @@ function renderBooks(books) {
 function renderQuotes(quotes) {
   const names = Object.keys(quotes);
   if (!names.length) return "<tbody><tr><td>бот ещё не сверял</td></tr></tbody>";
-  let html = "<thead><tr><th>пара</th><th>MEXC</th><th>Binance</th><th>Bybit</th><th>OKX</th><th>lag</th><th>ширина</th><th>когда</th></tr></thead><tbody>";
+  let html = "<thead><tr><th>пара</th><th>KuCoin</th><th>Binance</th><th>Bybit</th><th>OKX</th><th>lag</th><th>ширина</th><th>когда</th></tr></thead><tbody>";
   for (const name of names) {
     const q = quotes[name];
     if (!q || typeof q !== "object") {
       html += "<tr><td>" + esc(name) + "</td><td colspan='7'>не читается</td></tr>";
       continue;
     }
-    html += "<tr><td>" + esc(name) + "</td><td>" + esc(q.mexc) + "</td><td>" + esc(q.binance) + "</td><td>" + esc(q.bybit) +
+    html += "<tr><td>" + esc(name) + "</td><td>" + esc(q.kucoin) + "</td><td>" + esc(q.binance) + "</td><td>" + esc(q.bybit) +
       "</td><td>" + esc(q.okx) + "</td><td>" + esc(q.lag_bps) + "</td><td>" + esc(q.width_bps) + "</td><td>" + esc(q.at) + "</td></tr>";
   }
   return html + "</tbody>";
