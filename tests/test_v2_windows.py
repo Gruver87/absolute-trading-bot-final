@@ -19,19 +19,27 @@ from v2_windows import (  # noqa: E402
 )
 
 
-def test_research_windows_before_cut():
-    plan = plan_research_windows()
+def test_research_before_cut_uses_live_tip():
+    # One day before cut: boundary = now; windows end before cut automatically.
+    now = RESEARCH_CUT_MS - 24 * 60 * 60 * 1000
+    plan = plan_research_windows(now)
     assert plan.ready is True
-    assert plan.phase == "research"
-    assert plan.late_end_ms == RESEARCH_CUT_MS - LIMIT * BAR_MS
-    assert plan.early_end_ms == plan.late_end_ms - LIMIT * BAR_MS
-    assert plan.early_start_ms == plan.early_end_ms - LIMIT * BAR_MS
-    # Entire span ends before cut (tip holdout).
+    assert plan.boundary_ms == now
+    assert plan.late_end_ms == now - LIMIT * BAR_MS
     assert plan.late_end_ms < RESEARCH_CUT_MS
+    assert plan.early_start_ms == plan.early_end_ms - LIMIT * BAR_MS
+
+
+def test_research_after_cut_freezes_at_cut():
+    now = RESEARCH_CUT_MS + 10 * LIMIT * BAR_MS
+    plan = plan_research_windows(now)
+    assert plan.ready is True
+    assert plan.boundary_ms == RESEARCH_CUT_MS
+    assert plan.late_end_ms == RESEARCH_CUT_MS - LIMIT * BAR_MS
+    assert plan.late_end_ms <= now - LIMIT * BAR_MS
 
 
 def test_holdout_not_ready_before_cut():
-    # "Now" still before holdout_start → cannot fit post-cut windows.
     now = HOLDOUT_START_MS - BAR_MS
     plan = plan_holdout_windows(now)
     assert plan.ready is False

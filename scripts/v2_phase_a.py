@@ -189,13 +189,23 @@ def score_candidate(early: WindowScore, late: WindowScore) -> dict[str, object]:
 
 
 def main() -> int:
-    plan = plan_research_windows()
+    from spotbot.kucoin import KucoinClient, KucoinError, KucoinRateLimit
+
+    try:
+        now_ms = int(KucoinClient().server_time_ms())
+    except (KucoinError, KucoinRateLimit) as exc:
+        print(f"phase A clock failed: {exc}", file=sys.stderr)
+        return 1
+
+    plan = plan_research_windows(now_ms)
     cut = datetime.fromtimestamp(RESEARCH_CUT_MS / 1000, tz=timezone.utc).isoformat()
     print(f"phase=A research_cut={cut}")
+    print(f"live_now_ms={now_ms} boundary_ms={plan.boundary_ms}")
     print(
         f"windows early_end_ms={plan.early_end_ms} late_end_ms={plan.late_end_ms} "
         f"early_start_ms={plan.early_start_ms} ready={plan.ready}"
     )
+    print("constraint: all selection bars open < research_cut; tip holdout vs boundary")
     if not plan.ready:
         print("PHASE_A: NOT_READY")
         return 2

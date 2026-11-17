@@ -24,25 +24,35 @@ class GatePlan:
     boundary_ms: int
 
 
-def plan_research_windows() -> GatePlan:
-    """Two adjacent 1000×5m windows entirely before research_cut.
+def plan_research_windows(now_ms: int) -> GatePlan:
+    """Two adjacent 1000×5m windows for Phase A selection.
 
-    Treats research_cut as the tip: late_end = cut − 1000 bars (tip holdout to the cut).
-    No candle with open ≥ research_cut enters Phase A selection.
+    All selected bars must have open < research_cut. Tip holdout uses
+    boundary = min(research_cut, live now) so windows also satisfy replay's
+    live tip-holdout check before the cut date arrives.
     """
-    now_ms = RESEARCH_CUT_MS
-    late_end = now_ms - LIMIT * BAR_MS
+    if not isinstance(now_ms, int) or isinstance(now_ms, bool) or now_ms <= 0:
+        raise ValueError("now_ms must be a positive int")
+    boundary = min(RESEARCH_CUT_MS, now_ms)
+    late_end = boundary - LIMIT * BAR_MS
     early_end = late_end - LIMIT * BAR_MS
     early_start = early_end - LIMIT * BAR_MS
+    # Refuse if late window would reach into post-cut tape.
+    ready = (
+        early_start > 0
+        and late_end > early_end
+        and late_end <= RESEARCH_CUT_MS
+        and late_end <= now_ms - LIMIT * BAR_MS
+    )
     return GatePlan(
         now_ms=now_ms,
         early_end_ms=early_end,
         late_end_ms=late_end,
         early_start_ms=early_start,
-        ready=early_start > 0 and late_end > early_end,
-        shortfall_bars=0,
+        ready=ready,
+        shortfall_bars=0 if ready else 1,
         phase="research",
-        boundary_ms=RESEARCH_CUT_MS,
+        boundary_ms=boundary,
     )
 
 

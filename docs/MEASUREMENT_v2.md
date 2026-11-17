@@ -18,17 +18,18 @@
 
 Phase A research may use tape with open **&lt; research_cut**. Blind holdout unlock uses open **≥ holdout_start** only after Candidate Spec freeze. A research PASS on pre-cut / current sliding windows is **not** paper unlock.
 
-## Candidate Spec — trend-following (frozen on this branch)
+## Candidate Spec — see `CANDIDATE_SPEC_v2.md` (frozen A3)
 
 | Lever | Value |
 |---|---|
-| Entry | Donchian: close **&gt;** max high of prior **20** bars; quote volume ≥ **2×** median of prior 12 |
-| Exit | Trailing stop **ATR(14) × 3** (Wilder); initial stop = trail gap = 3×ATR in bps at entry; take-profit disabled |
-| Filters | **No** `--prior-pays` (volume + Donchian is the filter) |
-| Sleeve / median | Same major/alt/meme books; zero-fee / no-lot pairs left out |
-| Env | `RESEARCH_ENTRY=donchian_20` `RESEARCH_TRAIL_ATR_MULT=3` (gate defaults these on this branch) |
+| Entry | Donchian: close **&gt;** max high of prior **55** bars; quote volume ≥ **2×** median of prior 12 |
+| Exit | Trailing stop **ATR(14) × 3** (Wilder); take-profit disabled |
+| Filters | **No** `--prior-pays` |
+| Env | `RESEARCH_ENTRY=donchian_55` `RESEARCH_TRAIL_ATR_MULT=3` |
+| Phase A | Pre-cut only via `scripts/v2_phase_a.py` |
+| Phase C | Blind holdout via `scripts/v2_holdout.py` |
 
-Both labeled halves (`rsi` / `lift-candles` paths) use this **same** entry+exit for the gate table (research pattern). Labels keep v1 names for tooling compatibility.
+Both labeled halves use this same entry+exit. Labels keep v1 names for tooling compatibility.
 
 ## PASS bundle (paper unlock later — not today’s merge bar)
 
