@@ -33,6 +33,9 @@ copy .env.example .env
 | `python scripts/unseen_gate.py` | Готовность невиденной ленты (гейта); без `--run` свечи не гоняет; пишет строку в `data/gate_history.jsonl` |
 | `python scripts/unseen_gate.py --run` | Два окна гейта через `replay_main`; входы не включает; журналирует восемь медиан |
 | `python scripts/kucoin_keyed_smoke.py` | Ключи: публичные часы + `GET /accounts`; ордера не ставит; при `SPOT_LIVE=1` отказывает |
+| `python scripts/bot_gate.py` | Honesty needles (PROTOCOL_STATUS / Agent Skills) — не edge claim |
+| `.\scripts\test_all.ps1` | `bot_gate` + pytest; входы не включает |
+| `.\scripts\link_agent_skills.ps1` | Зеркало Cursor skills из `dup-agent-skills` |
 | `python -m pytest tests/ -q` | Проверка правил. Корень проекта на пути импорта |
 
 Ключи KuCoin в исходниках не лежат. Токен Telegram процесс не загружает. Публичные свечи работают без ключей.
