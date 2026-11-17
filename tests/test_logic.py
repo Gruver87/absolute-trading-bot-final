@@ -1793,7 +1793,7 @@ def test_a_fraction_is_not_a_volume_signal() -> None:
     except KucoinError as exc:
         assert "integer" in str(exc) or "large" in str(exc)
     try:
-        parse_klines("BTCUSDT", [[]] * 1_001)
+        parse_klines("BTCUSDT", [[]] * 1_501)
         raise AssertionError("too many candles must not be parsed")
     except KucoinError as exc:
         assert "many" in str(exc)

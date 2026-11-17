@@ -25,6 +25,12 @@
 
 Оснастка гейта (только чтение ленты, входы не включает): `python scripts/unseen_gate.py` — готовность ленты; `python scripts/unseen_gate.py --run` — два окна через неизменный `spotbot.replay_main --sleeves --prior-pays`. Окна целиком с open ≥ 2026-10-15 00:00 UTC. PASS скрипта не ставит `SPOT_ENTRIES` и не шлёт ордера.
 
+Запись гейта после cutover на KuCoin (параметры не подбирались, `SPOT_ENTRIES` не включали):
+
+| Прогон | Готовность | Восемь медианы (early → late), USDT | Итог |
+|---|---|---|---|
+| 2026-11-17 ~10:29 UTC, tip после `53fa0e2` + page-fix 1m | READY | earlier rsi 0.00 / −2.84; earlier lift −3.46 / −4.31; later rsi 0.00 / −1.69; later lift 0.00 / 0.00 | FAIL |
+
 ## Как считается прогон
 
 `python -m spotbot.replay_main` печатает результат RSI и свечную половину правила ликвидности на раннем и позднем куске одной ленты, и ту же медиану отдельно по книгам major, alt и meme. Правило на трёх книгах одно.

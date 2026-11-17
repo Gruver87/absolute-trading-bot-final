@@ -290,18 +290,25 @@ class KucoinClient:
         found: list[tuple[int, int]] = []
         wire = wire_symbol(symbol)
         type_name = _interval_type(interval)
+        # KuCoin caps one candles response at 1500. Request that many bars at a time
+        # from the cursor forward; a wide endAt alone returns the newest 1500 and
+        # would skip early history (and trip the parse ceiling).
+        page_bars = 1_500
         for page in range(16):
             if cursor >= end_ms:
                 break
             if page:
                 time.sleep(0.2)
+            page_end = cursor + page_bars * span
+            if page_end > end_ms:
+                page_end = end_ms
             payload = self._public(
                 "/api/v1/market/candles",
                 {
                     "symbol": wire,
                     "type": type_name,
                     "startAt": str(cursor // 1000),
-                    "endAt": str((end_ms - 1) // 1000),
+                    "endAt": str((page_end - 1) // 1000),
                 },
             )
             batch = _timed_closes(symbol, _candles_to_binance(payload, span, symbol), span)
@@ -1170,7 +1177,8 @@ def _parsed_klines(
         raise KucoinError(f"kline interval for {symbol} is not the one requested")
     if not isinstance(payload, list) or len(payload) < min_rows:
         raise KucoinError(f"no klines for {symbol}")
-    if len(payload) > 1_000:
+    # KuCoin documents at most 1500 candles per response; match that ceiling.
+    if len(payload) > 1_500:
         raise KucoinError(f"too many klines for {symbol}")
     rows: list[tuple[int, int, int, int, int, int]] = []
     skipped_volume = False
