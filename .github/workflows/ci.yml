@@ -22,5 +22,7 @@ jobs:
           pip install -r requirements.txt pytest
       - name: Compile (light lint)
         run: python -m compileall -q spotbot scripts
+      - name: Honesty gate
+        run: python scripts/bot_gate.py
       - name: Pytest
         run: python -m pytest tests/ -q
