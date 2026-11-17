@@ -1,4 +1,4 @@
-"""Taker fee in integer satoshi. Standard MEXC spot taker is 5 bps per side.
+"""Taker fee in integer satoshi. Standard KuCoin spot taker is 5 bps per side.
 
 Paper fills use this. A live fill is whatever the exchange reports; this module
 does not add a second fee on top of an exchange debit.

@@ -144,7 +144,7 @@ def main(argv: list[str] | None = None) -> int:
         "--now-ms",
         type=int,
         default=0,
-        help="override server time (tests); 0 = ask MEXC public clock",
+        help="override server time (tests); 0 = ask KuCoin public clock",
     )
     args = parser.parse_args(argv)
 
@@ -152,11 +152,11 @@ def main(argv: list[str] | None = None) -> int:
     if now_ms <= 0:
         # Local import so --help and unit tests of plan_windows need no network.
         sys.path.insert(0, str(ROOT))
-        from spotbot.mexc import MexcClient, MexcError, MexcRateLimit
+        from spotbot.kucoin import KucoinClient, KucoinError, KucoinRateLimit
 
         try:
-            now_ms = int(MexcClient().server_time_ms())
-        except (MexcError, MexcRateLimit) as exc:
+            now_ms = int(KucoinClient().server_time_ms())
+        except (KucoinError, KucoinRateLimit) as exc:
             print(f"gate clock failed: {exc}", file=sys.stderr)
             return 1
 

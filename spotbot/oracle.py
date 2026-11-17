@@ -1,6 +1,6 @@
 """Live public prices from other spot venues, stored as satoshi.
 
-Orders stay on MEXC. Binance, Bybit, and OKX are read at the decision and are
+Orders stay on KuCoin. Binance, Bybit, and OKX are read at the decision and are
 not traded. A missing venue is omitted. A buy needs at least one other price.
 """
 
@@ -27,9 +27,9 @@ class _DropCookies(requests.cookies.RequestsCookieJar):
     def set_cookie(self, cookie, *args, **kwargs):  # noqa: ANN001
         return None
 
-# Do not buy when MEXC is this far richer than the other books.
+# Do not buy when KuCoin is this far richer than the other books.
 BUY_MAX_AHEAD_BPS = 15
-# Sell a winner early when MEXC has run this far ahead of the other books.
+# Sell a winner early when KuCoin has run this far ahead of the other books.
 SELL_AHEAD_BPS = 15
 SELL_AHEAD_MIN_PROFIT_BPS = 30
 MAX_WIDTH_BPS = 30
@@ -72,28 +72,28 @@ def deviation_bps(prices: list[int]) -> int | None:
     return width
 
 
-def lag_bps(mexc_micro: int, peers: list[int]) -> int | None:
-    """Signed bps of the live MEXC price against the median of the other venues.
+def lag_bps(home_micro: int, peers: list[int]) -> int | None:
+    """Signed bps of the live KuCoin price against the median of the other venues.
 
-    Positive means MEXC is richer. None when there is no other price.
+    Positive means KuCoin is richer. None when there is no other price.
     """
     if not isinstance(peers, list) or len(peers) > 8:
         return None
     vals = [price for price in peers if _price_ok(price)]
-    if not _price_ok(mexc_micro) or not vals:
+    if not _price_ok(home_micro) or not vals:
         return None
     ordered = sorted(vals)
     mid = _lower_middle(ordered)
     if mid <= 0:
         return None
-    lag = (mexc_micro - mid) * 10_000 // mid
+    lag = (home_micro - mid) * 10_000 // mid
     if lag <= -1_000_000_000 or lag >= 1_000_000_000:
         return None
     return lag
 
 
 def cheapest_first(rows: list[tuple[str, int]]) -> list[str]:
-    """Order symbols by lag. A lower lag means MEXC is cheaper. Ties follow the name."""
+    """Order symbols by lag. A lower lag means KuCoin is cheaper. Ties follow the name."""
     if not isinstance(rows, list) or len(rows) > 32:
         return []
     clean = [
@@ -108,20 +108,20 @@ def cheapest_first(rows: list[tuple[str, int]]) -> list[str]:
     return [symbol for symbol, _lag in sorted(clean, key=lambda row: (row[1], row[0]))]
 
 
-def entry_allowed(mexc_micro: int, peers: list[int]) -> bool:
-    """Buy on MEXC only when another book exists and MEXC is not ahead of it."""
-    lag = lag_bps(mexc_micro, peers)
-    width = deviation_bps([mexc_micro, *peers])
+def entry_allowed(home_micro: int, peers: list[int]) -> bool:
+    """Buy on KuCoin only when another book exists and KuCoin is not ahead of it."""
+    lag = lag_bps(home_micro, peers)
+    width = deviation_bps([home_micro, *peers])
     if lag is None or width is None:
         return False
     return width <= MAX_WIDTH_BPS and lag <= BUY_MAX_AHEAD_BPS
 
 
-def ahead_exit(mexc_micro: int, peers: list[int], profit_bps: int) -> bool:
-    """True when a profitable MEXC position is richer than the other books."""
+def ahead_exit(home_micro: int, peers: list[int], profit_bps: int) -> bool:
+    """True when a profitable KuCoin position is richer than the other books."""
     if isinstance(profit_bps, bool) or not isinstance(profit_bps, int):
         return False
-    lag = lag_bps(mexc_micro, peers)
+    lag = lag_bps(home_micro, peers)
     if lag is None:
         return False
     return profit_bps >= SELL_AHEAD_MIN_PROFIT_BPS and lag >= SELL_AHEAD_BPS

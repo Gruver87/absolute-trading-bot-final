@@ -17,11 +17,11 @@ from spotbot.rules import budget_micro, cap_spend, plan_paper_buy, round_base_at
 from spotbot.liquidity import ask_wall_exit, lift_signal
 from spotbot.analyzer import score
 from spotbot.oracle import ahead_exit, cheapest_first, deviation_bps, entry_allowed, lag_bps, venue_quotes
-from spotbot.mexc import (
-    MexcClient,
-    MexcError,
-    MexcOrderAccepted,
-    MexcRateLimit,
+from spotbot.kucoin import (
+    KucoinClient,
+    KucoinError,
+    KucoinOrderAccepted,
+    KucoinRateLimit,
     clock_allows,
     executed_fill,
     new_client_order_id,
@@ -84,7 +84,7 @@ class CycleReport:
 
 def run_cycle(
     cfg: Config,
-    client: MexcClient,
+    client: KucoinClient,
     path: Path,
     book_name: str = "",
     sibling_paths: tuple[Path, ...] = (),
@@ -154,7 +154,7 @@ def run_cycle(
         else:
             deadline = time.monotonic() + CYCLE_BUDGET_SEC
             entries, skipped = _open_positions(cfg, client, book, path, name, deadline)
-    except MexcRateLimit as exc:
+    except KucoinRateLimit as exc:
         limited = exc
         LOG.warning("rate limit, cycle stopped and the book is kept: %s", _short(str(exc)))
     else:
@@ -181,7 +181,7 @@ def run_cycle(
 
 
 def _confirm_exit(
-    client: MexcClient,
+    client: KucoinClient,
     pos: Position,
     reason: str,
     stop: int,
@@ -191,14 +191,14 @@ def _confirm_exit(
 ) -> tuple[str | None, int, bool]:
     """Read the book again. The third value is true when the bid cannot be used.
 
-    Ask-wall and mexc-ahead are checked on a fresh depth and fresh peers.
+    Ask-wall and kucoin-ahead are checked on a fresh depth and fresh peers.
     A failed fresh read cancels that early exit. A stop still uses the bid.
     """
     try:
         fresh_bid, _fresh_ask = client.book_top(pos.symbol)
-    except MexcRateLimit:
+    except KucoinRateLimit:
         raise
-    except MexcError:
+    except KucoinError:
         return None, 0, True
     if not mark_ok(pos.peak_micro, fresh_bid):
         return None, 0, True
@@ -208,21 +208,21 @@ def _confirm_exit(
     if fresh_reason is None and reason == "ask_wall":
         try:
             bid_notional, ask_notional = client.depth_notional(pos.symbol)
-        except MexcRateLimit:
+        except KucoinRateLimit:
             raise
-        except MexcError:
+        except KucoinError:
             bid_notional, ask_notional = 0, 0
         if ask_wall_exit(bid_notional, ask_notional, pnl_bps(pos.entry_micro, fresh_bid)):
             fresh_reason = "ask_wall"
-    if fresh_reason is None and reason == "mexc_ahead":
+    if fresh_reason is None and reason == "kucoin_ahead":
         peers = list(venue_quotes(pos.symbol).values())
         if ahead_exit(fresh_bid, peers, pnl_bps(pos.entry_micro, fresh_bid)):
-            fresh_reason = "mexc_ahead"
+            fresh_reason = "kucoin_ahead"
     return fresh_reason, fresh_bid, False
 
 
 def _recheck_ask(
-    client: MexcClient,
+    client: KucoinClient,
     symbol: str,
     approved: int,
     spread_limit: int,
@@ -232,9 +232,9 @@ def _recheck_ask(
     """The ask immediately before the order. None when it may no longer be bought."""
     try:
         bid, ask = client.book_top(symbol)
-    except MexcRateLimit:
+    except KucoinRateLimit:
         raise
-    except MexcError:
+    except KucoinError:
         return None
     try:
         spread = top_spread_bps(bid, ask)
@@ -263,25 +263,25 @@ def _unseen(book: Book, now: int, interval_sec: int) -> bool:
     return now - book.seen_at > max(interval_sec * 2, 180)
 
 
-def _covers_cost(client: MexcClient, pos: Position, bid: int) -> bool:
+def _covers_cost(client: KucoinClient, pos: Position, bid: int) -> bool:
     """True only when a sell at this bid returns at least the coins' cost."""
     return _under_cost(client, pos, bid) is False
 
 
-def _early_exit_covers(client: MexcClient, pos: Position, bid: int, reason: str) -> bool:
+def _early_exit_covers(client: KucoinClient, pos: Position, bid: int, reason: str) -> bool:
     """A stop, trail, or take may sell at a loss. An early exit may not."""
-    if reason not in ("mexc_ahead", "ask_wall"):
+    if reason not in ("kucoin_ahead", "ask_wall"):
         return True
     return _covers_cost(client, pos, bid)
 
 
-def _under_cost(client: MexcClient, pos: Position, bid: int) -> bool | None:
+def _under_cost(client: KucoinClient, pos: Position, bid: int) -> bool | None:
     """True when a sell at this bid would return less than the coins cost. None if the fee is unknown."""
     try:
         taker_bps = client.symbol_rule(pos.symbol).taker_bps
-    except MexcRateLimit:
+    except KucoinRateLimit:
         raise
-    except MexcError:
+    except KucoinError:
         return None
     try:
         gross = notional_micro(pos.base_atoms, bid)
@@ -293,7 +293,7 @@ def _under_cost(client: MexcClient, pos: Position, bid: int) -> bool | None:
     return credit < pos.quote_micro
 
 
-def _gap_hold(cfg: Config, client: MexcClient, book: Book, pos: Position, bid: int) -> bool:
+def _gap_hold(cfg: Config, client: KucoinClient, book: Book, pos: Position, bid: int) -> bool:
     """After a dark stretch, a bid under cost is not sold. The hold stays until the bid covers the cost."""
     under = _under_cost(client, pos, bid)
     dark = _unseen(book, _now_sec(), cfg.interval_sec)
@@ -315,7 +315,7 @@ def _gap_hold(cfg: Config, client: MexcClient, book: Book, pos: Position, bid: i
     return False
 
 
-def _rearm_if_under(client: MexcClient, pos: Position, bid: int, armed: bool) -> bool:
+def _rearm_if_under(client: KucoinClient, pos: Position, bid: int, armed: bool) -> bool:
     """The confirm bid fell back under cost. The hold returns and the order is not sent."""
     if not armed:
         return False
@@ -329,7 +329,7 @@ def _rearm_if_under(client: MexcClient, pos: Position, bid: int, armed: bool) ->
 
 def _close_positions(
     cfg: Config,
-    client: MexcClient,
+    client: KucoinClient,
     book: Book,
     path: Path,
     book_name: str,
@@ -360,9 +360,9 @@ def _close_positions(
         pos.rules_ok = True
         try:
             bid, _ask = client.book_top(pos.symbol)
-        except MexcRateLimit:
+        except KucoinRateLimit:
             raise
-        except MexcError as exc:
+        except KucoinError as exc:
             LOG.warning("book ticker failed, position kept: %s", _short(str(exc)))
             unmarked.append(pos.symbol)
             kept.append(pos)
@@ -394,9 +394,9 @@ def _close_positions(
         if reason is None and cfg.mode == "liquidity":
             try:
                 bid_notional, ask_notional = client.depth_notional(pos.symbol)
-            except MexcRateLimit:
+            except KucoinRateLimit:
                 raise
-            except MexcError as exc:
+            except KucoinError as exc:
                 LOG.warning("depth failed, position kept: %s", _short(str(exc)))
                 kept.append(pos)
                 continue
@@ -410,7 +410,7 @@ def _close_positions(
             if ahead_exit(price, list(quotes.values()), pnl_bps(pos.entry_micro, price)) and _covers_cost(
                 client, pos, price
             ):
-                reason = "mexc_ahead"
+                reason = "kucoin_ahead"
         if reason is None:
             kept.append(pos)
             continue
@@ -444,9 +444,9 @@ def _close_positions(
         if cfg.live:
             try:
                 rule = client.symbol_rule(pos.symbol)
-            except MexcRateLimit:
+            except KucoinRateLimit:
                 raise
-            except MexcError as exc:
+            except KucoinError as exc:
                 LOG.warning("rules %s, sell kept: %s", pos.symbol, _short(str(exc)))
                 pos.rules_ok = False
                 kept.append(pos)
@@ -460,9 +460,9 @@ def _close_positions(
                 continue
             try:
                 _total, _free_usdt, _bases, free_bases = client.spot_balances()
-            except MexcRateLimit:
+            except KucoinRateLimit:
                 raise
-            except MexcError as exc:
+            except KucoinError as exc:
                 LOG.warning("balance read failed, sell kept: %s", _short(str(exc)))
                 pos.balance_ok = False
                 kept.append(pos)
@@ -514,14 +514,14 @@ def _close_positions(
             save_book(path, book)
             try:
                 fill = client.market_sell_base(pos.symbol, sell_atoms, client_id)
-            except MexcRateLimit:
+            except KucoinRateLimit:
                 raise
-            except MexcOrderAccepted as exc:
+            except KucoinOrderAccepted as exc:
                 _keep_exchange_ack(book, path, exc)
                 LOG.warning("sell failed, position kept: %s", _short(str(exc)))
                 kept.append(pos)
                 continue
-            except MexcError as exc:
+            except KucoinError as exc:
                 LOG.warning("sell failed, position kept: %s", _short(str(exc)))
                 kept.append(pos)
                 continue
@@ -586,9 +586,9 @@ def _close_positions(
             rule = client.symbol_rule(pos.symbol)
             taker_bps = rule.taker_bps
             step = rule.base_step_atoms
-        except MexcRateLimit:
+        except KucoinRateLimit:
             raise
-        except MexcError as exc:
+        except KucoinError as exc:
             LOG.warning("rules %s, paper sell kept: %s", pos.symbol, _short(str(exc)))
             pos.rules_ok = False
             kept.append(pos)
@@ -663,7 +663,7 @@ def _close_positions(
 
 def _open_positions(
     cfg: Config,
-    client: MexcClient,
+    client: KucoinClient,
     book: Book,
     path: Path,
     book_name: str,
@@ -687,9 +687,9 @@ def _open_positions(
             continue
         try:
             closes = client.klines(symbol)
-        except MexcRateLimit:
+        except KucoinRateLimit:
             raise
-        except MexcError as exc:
+        except KucoinError as exc:
             LOG.warning("klines failed: %s", _short(str(exc)))
             skipped += 1
             continue
@@ -706,9 +706,9 @@ def _open_positions(
             continue
         try:
             _bid, price = client.book_top(symbol)
-        except MexcRateLimit:
+        except KucoinRateLimit:
             raise
-        except MexcError as exc:
+        except KucoinError as exc:
             LOG.warning("book ticker failed: %s", _short(str(exc)))
             skipped += 1
             continue
@@ -722,9 +722,9 @@ def _open_positions(
             continue
         try:
             bid_notional, ask_notional = client.depth_notional(symbol)
-        except MexcRateLimit:
+        except KucoinRateLimit:
             raise
-        except MexcError as exc:
+        except KucoinError as exc:
             LOG.warning("depth failed: %s", _short(str(exc)))
             skipped += 1
             continue
@@ -736,7 +736,7 @@ def _open_positions(
         _log_oracle(symbol, price, quotes, data_dir)
         peers = list(quotes.values())
         if not entry_allowed(price, peers):
-            LOG.info("skip %s: MEXC is ahead of the other books or they did not answer", symbol)
+            LOG.info("skip %s: KuCoin is ahead of the other books or they did not answer", symbol)
             skipped += 1
             continue
         lag = lag_bps(price, peers)
@@ -761,7 +761,7 @@ def _open_positions(
 
 def _open_liquidity(
     cfg: Config,
-    client: MexcClient,
+    client: KucoinClient,
     book: Book,
     held: set[str],
     slots: int,
@@ -781,9 +781,9 @@ def _open_liquidity(
             for symbol in client.liquid_usdt(200_000 * SATOSHI_MULTIPLIER, 50, 1_200, 8)
             if symbol in cfg.symbols
         ]
-        except MexcRateLimit:
+        except KucoinRateLimit:
             raise
-        except MexcError as exc:
+        except KucoinError as exc:
             LOG.warning("ticker scan failed: %s", _short(str(exc)))
             return 0, 1
     LOG.info("liquidity candidates=%s", ",".join(symbols) if symbols else "none")
@@ -795,10 +795,10 @@ def _open_liquidity(
             break
         try:
             probes[symbol] = _probe_lift(client, symbol)
-        except MexcRateLimit as exc:
+        except KucoinRateLimit as exc:
             LOG.warning("rate limit, stop scan: %s", _short(str(exc)))
             raise
-        except MexcError as exc:
+        except KucoinError as exc:
             LOG.warning("lift check failed: %s", _short(str(exc)))
             skipped += 1
     ready: list[tuple[int, int, str, int, str]] = []
@@ -825,9 +825,9 @@ def _open_liquidity(
             continue
         try:
             _bid, price = client.book_top(symbol)
-        except MexcRateLimit:
+        except KucoinRateLimit:
             raise
-        except MexcError as exc:
+        except KucoinError as exc:
             LOG.warning("book ticker failed: %s", _short(str(exc)))
             skipped += 1
             continue
@@ -837,7 +837,7 @@ def _open_liquidity(
             continue
         _log_oracle(symbol, price, quotes, data_dir)
         if not entry_allowed(price, peers):
-            LOG.info("skip %s: MEXC is ahead of the other books or they did not answer", symbol)
+            LOG.info("skip %s: KuCoin is ahead of the other books or they did not answer", symbol)
             skipped += 1
             continue
         dev = deviation_bps([price, *peers])
@@ -887,7 +887,7 @@ def _open_liquidity(
 
 def _try_buy(
     cfg: Config,
-    client: MexcClient,
+    client: KucoinClient,
     book: Book,
     path: Path,
     book_name: str,
@@ -921,9 +921,9 @@ def _try_buy(
         return False
     try:
         rule = client.symbol_rule(symbol)
-    except MexcRateLimit:
+    except KucoinRateLimit:
         raise
-    except MexcError as exc:
+    except KucoinError as exc:
         LOG.warning("rules %s: %s", symbol, _short(str(exc)))
         return False
     if not rule.tradable:
@@ -934,9 +934,9 @@ def _try_buy(
         return False
     try:
         _bid, ask = client.book_top(symbol)
-    except MexcRateLimit:
+    except KucoinRateLimit:
         raise
-    except MexcError as exc:
+    except KucoinError as exc:
         LOG.warning("book ticker %s, skip buy: %s", symbol, _short(str(exc)))
         return False
     try:
@@ -970,9 +970,9 @@ def _try_buy(
     if cfg.live:
         try:
             _total, free_usdt, _bases, _free_bases = client.spot_balances()
-        except MexcRateLimit:
+        except KucoinRateLimit:
             raise
-        except MexcError as exc:
+        except KucoinError as exc:
             LOG.warning("balance read failed, skip buy: %s", _short(str(exc)))
             return False
         spend = cap_spend(
@@ -997,13 +997,13 @@ def _try_buy(
         save_book(path, book)
         try:
             fill = client.market_buy_quote(symbol, spend, client_id)
-        except MexcRateLimit:
+        except KucoinRateLimit:
             raise
-        except MexcOrderAccepted as exc:
+        except KucoinOrderAccepted as exc:
             _keep_exchange_ack(book, path, exc)
             LOG.warning("buy failed, left pending: %s", _short(str(exc)))
             return False
-        except MexcError as exc:
+        except KucoinError as exc:
             LOG.warning("buy failed, left pending: %s", _short(str(exc)))
             return False
         fee = fill.fee_micro
@@ -1124,7 +1124,7 @@ def _try_buy(
     return True
 
 
-def _keep_exchange_ack(book: Book, path: Path, exc: MexcOrderAccepted) -> None:
+def _keep_exchange_ack(book: Book, path: Path, exc: KucoinOrderAccepted) -> None:
     """The order was accepted. Its id stays on the book so a missing lookup cannot forget it."""
     order_id = exc.exchange_order_id
     if not exchange_order_id_ok(order_id) or book.pending_exchange_order_id:
@@ -1141,13 +1141,13 @@ def _note_miss(book: Book) -> None:
         book.pending_misses += 1
 
 
-def _resolve_pending(client: MexcClient, book: Book, path: Path) -> str | None:
+def _resolve_pending(client: KucoinClient, book: Book, path: Path) -> str | None:
     """Finish a live order that was sent and not yet written into the book."""
     try:
         order = client.order_by_client(book.pending_symbol, book.pending_client_id)
-    except MexcRateLimit:
+    except KucoinRateLimit:
         raise
-    except MexcError as exc:
+    except KucoinError as exc:
         if order_missing(str(exc)):
             _note_miss(book)
             has_fill = any(pos.client_order_id == book.pending_client_id for pos in book.positions)
@@ -1172,9 +1172,9 @@ def _resolve_pending(client: MexcClient, book: Book, path: Path) -> str | None:
     if not order_filled(order) and not order_finished(order):
         try:
             got = executed_fill(order)
-        except MexcRateLimit:
+        except KucoinRateLimit:
             raise
-        except MexcError as exc:
+        except KucoinError as exc:
             return _short(str(exc))
         if got is None:
             return _short(f"{book.pending_side} {book.pending_symbol} status {_status_text(order)}")
@@ -1189,9 +1189,9 @@ def _resolve_pending(client: MexcClient, book: Book, path: Path) -> str | None:
     if not order_filled(order):
         try:
             got = executed_fill(order)
-        except MexcRateLimit:
+        except KucoinRateLimit:
             raise
-        except MexcError as exc:
+        except KucoinError as exc:
             return _short(str(exc))
         if got is None:
             if (
@@ -1210,9 +1210,9 @@ def _resolve_pending(client: MexcClient, book: Book, path: Path) -> str | None:
     else:
         try:
             base_atoms, quote_micro, price_micro = quantities_from_order(order)
-        except MexcRateLimit:
+        except KucoinRateLimit:
             raise
-        except MexcError as exc:
+        except KucoinError as exc:
             return _short(str(exc))
     over = _over_request(book, base_atoms, quote_micro)
     if over:
@@ -1245,7 +1245,7 @@ def _over_request(book: Book, base_atoms: int, quote_micro: int) -> str | None:
 
 
 def _record_progress(
-    client: MexcClient,
+    client: KucoinClient,
     book: Book,
     path: Path,
     order: dict[str, object],
@@ -1338,7 +1338,7 @@ def _note_progress(
 
 
 def _apply_progress(
-    client: MexcClient,
+    client: KucoinClient,
     book: Book,
     order: dict[str, object],
     base_atoms: int,
@@ -1416,7 +1416,7 @@ def _apply_progress(
 
 
 def _order_fees(
-    client: MexcClient, symbol: str, order_id: str, side: str
+    client: KucoinClient, symbol: str, order_id: str, side: str
 ) -> tuple[int, int, int, int] | None:
     """USDT fee and base-asset fee. None when the fee cannot be priced."""
     if not usdt_symbol_ok(symbol):
@@ -1425,9 +1425,9 @@ def _order_fees(
     try:
         trades = client.my_trades(symbol, order_id=order_id)
         return split_commission(trades, order_id, symbol[:-4], side)
-    except MexcRateLimit:
+    except KucoinRateLimit:
         raise
-    except (MexcError, FeeAssetError) as exc:
+    except (KucoinError, FeeAssetError) as exc:
         LOG.warning("trade fee %s: %s", symbol, _short(str(exc)))
         return None
 
@@ -1468,12 +1468,12 @@ def _sibling_positions(paths: tuple[Path, ...]) -> list[tuple[str, int]]:
     return rows
 
 
-def _account_conflict(client: MexcClient, book: Book, sibling_paths: tuple[Path, ...] = ()) -> str | None:
+def _account_conflict(client: KucoinClient, book: Book, sibling_paths: tuple[Path, ...] = ()) -> str | None:
     try:
         _usdt, _free, bases, _free_bases = client.spot_balances()
-    except MexcRateLimit:
+    except KucoinRateLimit:
         raise
-    except MexcError as exc:
+    except KucoinError as exc:
         return _short(str(exc))
     positions = [(pos.symbol, pos.base_atoms) for pos in book.positions]
     try:
@@ -1497,7 +1497,7 @@ def _unpriced_why(book: Book) -> str:
     return "equity is not priced after the sell fee"
 
 
-def _exit_fees(client: MexcClient, book: Book) -> dict[str, int] | None:
+def _exit_fees(client: KucoinClient, book: Book) -> dict[str, int] | None:
     """Taker rate for each open coin. None when a rate cannot be read.
 
     A coin below the lot, or one whose rules were not read, is not asked again.
@@ -1511,9 +1511,9 @@ def _exit_fees(client: MexcClient, book: Book) -> dict[str, int] | None:
             continue
         try:
             rule = client.symbol_rule(pos.symbol)
-        except MexcRateLimit:
+        except KucoinRateLimit:
             raise
-        except MexcError as exc:
+        except KucoinError as exc:
             return None
         if rule.taker_bps < 0:
             return None
@@ -1521,7 +1521,7 @@ def _exit_fees(client: MexcClient, book: Book) -> dict[str, int] | None:
     return fees
 
 
-def _note_lot(client: MexcClient, pos: Position) -> bool:
+def _note_lot(client: KucoinClient, pos: Position) -> bool:
     """A second read of the lot. An unread step does not invent a sellable coin."""
     step = _lot_step(client, pos.symbol)
     if step is None:
@@ -1530,16 +1530,16 @@ def _note_lot(client: MexcClient, pos: Position) -> bool:
     return True
 
 
-def _lot_step(client: MexcClient, symbol: str) -> int | None:
+def _lot_step(client: KucoinClient, symbol: str) -> int | None:
     try:
         return client.symbol_rule(symbol).base_step_atoms
-    except MexcRateLimit:
+    except KucoinRateLimit:
         raise
-    except MexcError as exc:
+    except KucoinError as exc:
         return None
 
 
-def _slots_used(client: MexcClient, book: Book) -> int:
+def _slots_used(client: KucoinClient, book: Book) -> int:
     """Positions large enough to sell. An unknown lot still occupies the slot."""
     if not isinstance(book.positions, list) or len(book.positions) > 8:
         return 14
@@ -1551,18 +1551,18 @@ def _slots_used(client: MexcClient, book: Book) -> int:
     return used
 
 
-def _clock_ok(client: MexcClient) -> bool:
+def _clock_ok(client: KucoinClient) -> bool:
     """False when the exchange clock cannot be read or the local clock is too far."""
     try:
         server_ms = client.server_time_ms()
-    except MexcRateLimit:
+    except KucoinRateLimit:
         raise
-    except MexcError as exc:
+    except KucoinError as exc:
         LOG.warning("server time unread, live orders paused: %s", _short(str(exc)))
         return False
     if clock_allows(_now_ms(), server_ms, CLOCK_SKEW_MS):
         return True
-    LOG.warning("clock skew against MEXC, live orders paused")
+    LOG.warning("clock skew against KuCoin, live orders paused")
     return False
 
 
@@ -1648,7 +1648,7 @@ def _now_sec() -> int:
 
 
 def trading_day() -> str:
-    """The exchange day. MEXC resets on UTC, not on the computer's local date."""
+    """The exchange day. KuCoin resets on UTC, not on the computer's local date."""
     return datetime.now(timezone.utc).date().isoformat()
 
 
@@ -1708,20 +1708,20 @@ def _entries_halted(book: Book, daily_loss_bps: int, open_loss: int = 0) -> bool
 
 
 def _probe_lift(
-    client: MexcClient, symbol: str
+    client: KucoinClient, symbol: str
 ) -> tuple[list[tuple[int, int, int, int, int]], int, int, dict[str, int]]:
     rows = client.ohlcv(symbol, "5m", 20)
     bid, ask = client.depth_notional(symbol)
     return rows, bid, ask, venue_quotes(symbol)
 
 
-def _touch_still_bid(client: MexcClient, symbol: str) -> bool:
+def _touch_still_bid(client: KucoinClient, symbol: str) -> bool:
     """The touch immediately before the order. A heavier ask is not bought."""
     try:
         bid_notional, ask_notional = client.depth_notional(symbol)
-    except MexcRateLimit:
+    except KucoinRateLimit:
         raise
-    except MexcError as exc:
+    except KucoinError as exc:
         LOG.warning("depth failed, skip buy: %s", _short(str(exc)))
         return False
     return _bid_is_larger(bid_notional, ask_notional)
@@ -1859,19 +1859,19 @@ def _shown_usdt(micro: object) -> str:
         return "unreadable"
 
 
-def _log_oracle(symbol: str, mexc_micro: int, quotes: dict[str, int], data_dir: Path | None = None) -> None:
+def _log_oracle(symbol: str, home_micro: int, quotes: dict[str, int], data_dir: Path | None = None) -> None:
     if not isinstance(symbol, str) or len(symbol) > 32 or not isinstance(quotes, dict) or len(quotes) > 8:
         return
     peers = list(quotes.values())
-    lag = lag_bps(mexc_micro, peers)
-    width = deviation_bps([mexc_micro, *peers])
+    lag = lag_bps(home_micro, peers)
+    width = deviation_bps([home_micro, *peers])
     binance = _shown_price(quotes["binance"]) if "binance" in quotes else "-"
     bybit = _shown_price(quotes["bybit"]) if "bybit" in quotes else "-"
     okx = _shown_price(quotes["okx"]) if "okx" in quotes else "-"
     LOG.info(
-        "oracle %s mexc=%s binance=%s bybit=%s okx=%s lag_bps=%s width_bps=%s",
+        "oracle %s kucoin=%s binance=%s bybit=%s okx=%s lag_bps=%s width_bps=%s",
         symbol,
-        _shown_price(mexc_micro),
+        _shown_price(home_micro),
         binance,
         bybit,
         okx,
@@ -1879,4 +1879,4 @@ def _log_oracle(symbol: str, mexc_micro: int, quotes: dict[str, int], data_dir: 
         "-" if width is None else width,
     )
     if data_dir is not None:
-        note_quote(data_dir, symbol, _shown_price(mexc_micro), binance, bybit, okx, lag, width)
+        note_quote(data_dir, symbol, _shown_price(home_micro), binance, bybit, okx, lag, width)

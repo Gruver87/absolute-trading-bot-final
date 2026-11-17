@@ -204,7 +204,7 @@ class Entry:
 
 
 def closed_prices(prices: list[int]) -> list[int]:
-    """Drop the forming bar. MEXC klines end with the candle that is still open."""
+    """Drop the forming bar. KuCoin klines end with the candle that is still open."""
     if not isinstance(prices, list) or len(prices) < 2:
         return []
     if any(isinstance(price, bool) or not isinstance(price, int) or price <= 0 or price >= 10**24 for price in prices):

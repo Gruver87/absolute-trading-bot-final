@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 from spotbot.analyzer import backend
 from spotbot.config import Config, ConfigError, load_config
 from spotbot.engine import run_cycle
-from spotbot.mexc import MexcClient, MexcError, MexcRateLimit, backoff_sec
+from spotbot.kucoin import KucoinClient, KucoinError, KucoinRateLimit, backoff_sec
 from spotbot.money import MoneyError
 from spotbot.ops_http import DEFAULT_PORT, OpsError, parse_ops_port, serve
 from spotbot.sleeves import SleeveError, ledger_dir, run_sleeves
@@ -57,7 +57,7 @@ def main(argv: list[str] | None = None) -> int:
         logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
         logging.error("command is too wide")
         return 2
-    parser = argparse.ArgumentParser(description="MEXC spot bot, paper by default")
+    parser = argparse.ArgumentParser(description="KuCoin spot bot, paper by default")
     parser.add_argument("--live", action="store_true", help="send real orders; also requires SPOT_LIVE=1")
     parser.add_argument("--mode", choices=("rsi", "liquidity"), default=None)
     parser.add_argument("--once", action="store_true", help="run a single cycle and exit")
@@ -102,7 +102,12 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         threading.Thread(target=serve, args=(data_dir, ops_port), name="spot-ops", daemon=True).start()
         logging.info("ops http://127.0.0.1:%s", ops_port)
-    client = MexcClient(cfg.api_key, cfg.api_secret)
+    client = KucoinClient(
+        cfg.api_key,
+        cfg.api_secret,
+        api_passphrase=cfg.api_passphrase,
+        api_key_version=cfg.api_key_version,
+    )
     try:
         with hold_ledger(ledger_dir(data_dir, cfg.live)):
             return _trade(args, cfg, client, data_dir)
@@ -118,7 +123,7 @@ def _pause_sec(pause: object) -> int:
     return pause
 
 
-def _trade(args: argparse.Namespace, cfg: Config, client: MexcClient, data_dir: Path) -> int:
+def _trade(args: argparse.Namespace, cfg: Config, client: KucoinClient, data_dir: Path) -> int:
     """One process, one ledger. The caller already holds the directory."""
     if args.sleeves:
         logging.info("mode=%s sleeves=major,alt,meme strategy=%s", "LIVE" if cfg.live else "PAPER", cfg.mode)
@@ -128,13 +133,13 @@ def _trade(args: argparse.Namespace, cfg: Config, client: MexcClient, data_dir: 
             except (SleeveError, LedgerError) as exc:
                 logging.error("%s", _log_line(exc))
                 return 2
-            except MexcRateLimit as exc:
+            except KucoinRateLimit as exc:
                 logging.error("cycle failed closed: %s", _log_line(exc))
                 if args.once:
                     return 1
                 pause = backoff_sec(exc.retry_after_sec, cfg.interval_sec)
                 logging.error("rate limit pause %ss", pause)
-            except MexcError as exc:
+            except KucoinError as exc:
                 logging.error("cycle failed closed: %s", _log_line(exc))
                 if args.once:
                     return 1
@@ -162,13 +167,13 @@ def _trade(args: argparse.Namespace, cfg: Config, client: MexcClient, data_dir: 
     while True:
         try:
             run_cycle(cfg, client, book_path)
-        except MexcRateLimit as exc:
+        except KucoinRateLimit as exc:
             logging.error("cycle failed closed: %s", _log_line(exc))
             if args.once:
                 return 1
             pause = backoff_sec(exc.retry_after_sec, cfg.interval_sec)
             logging.error("rate limit pause %ss", pause)
-        except (MexcError, LedgerError) as exc:
+        except (KucoinError, LedgerError) as exc:
             logging.error("cycle failed closed: %s", _log_line(exc))
             if args.once:
                 return 1
