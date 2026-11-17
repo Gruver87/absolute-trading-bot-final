@@ -20,6 +20,8 @@ def test_research_mode_donchian(monkeypatch: pytest.MonkeyPatch) -> None:
     assert research_mode() is None
     monkeypatch.setenv("RESEARCH_ENTRY", "donchian_20")
     assert research_mode() == "donchian_20"
+    monkeypatch.setenv("RESEARCH_ENTRY", "bb_mr")
+    assert research_mode() == "bb_mr"
     monkeypatch.setenv("RESEARCH_ENTRY", "breakout")
     with pytest.raises(ValueError):
         research_mode()

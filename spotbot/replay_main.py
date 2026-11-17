@@ -307,7 +307,7 @@ def _print_result(label: str, symbol: str, bars: int, result: ReplayResult, take
         f"rule={label} symbol={symbol} bars={bars} trades={result.trades} "
         f"wins={result.wins} net={format_usdt(result.net_micro)} "
         f"fees={format_usdt(result.fees_micro)} open_at_end={result.ended_open} "
-        f"taker_bps={taker_bps}"
+        f"taker_bps={taker_bps} stops={result.stops} trails={result.trails} takes={result.takes}"
     )
     for fill in result.fills[:8]:
         print(

@@ -1,7 +1,7 @@
-"""Research-only entry: Donchian breakout + volume (trend-following candidate).
+"""Research-only entries for MEASUREMENT v2 Phase A (pre-cut selection).
 
-Selected with RESEARCH_ENTRY=donchian_20. Off by default on other branches.
-Does not flip SPOT_ENTRIES. Replay only.
+Env RESEARCH_ENTRY selects mode. Off by default. Does not flip SPOT_ENTRIES.
+Replay only.
 """
 
 from __future__ import annotations
@@ -10,10 +10,29 @@ import os
 from dataclasses import dataclass
 
 from spotbot.liquidity import volume_ratio_bps
-from spotbot.signals import Entry
+from spotbot.signals import Entry, below_lower_band, lower_band
 
 
-MODES = frozenset({"donchian_20"})
+MODES = frozenset(
+    {
+        "donchian_20",
+        "donchian_55",
+        "donchian_20_vol15",
+        "bb_mr",
+    }
+)
+
+_LOOKBACK = {
+    "donchian_20": 20,
+    "donchian_55": 55,
+    "donchian_20_vol15": 20,
+}
+
+_VOL_BPS = {
+    "donchian_20": 20_000,
+    "donchian_55": 20_000,
+    "donchian_20_vol15": 15_000,
+}
 
 
 def research_mode() -> str | None:
@@ -53,7 +72,6 @@ def _max_high(highs: list[int], lookback: int) -> int | None:
 
 
 def _volume_confirms(volumes: list[int], min_ratio_bps: int) -> bool:
-    """Last closed bar quote volume vs median of the 12 before it."""
     ratio = volume_ratio_bps(volumes)
     if ratio is None:
         return False
@@ -79,14 +97,27 @@ def donchian_entry(
     level = _max_high(highs, lookback)
     if level is None:
         return None
-    close = closes[-1]
-    if close <= level:
+    if closes[-1] <= level:
         return None
-    # volume_ratio_bps expects forming bar as last (+1) so [-2] is the signal bar.
     vol_window = volumes if len(volumes) == len(closes) + 1 else list(volumes) + [1]
     if not _volume_confirms(vol_window, min_volume_bps):
         return None
     return Entry(symbol, 0, f"donchian_{lookback}")
+
+
+def bb_mean_reversion_entry(symbol: str, closes: list[int], period: int = 20) -> Entry | None:
+    """Prior close at/under lower BB; this close reclaims above band and prior close."""
+    if not isinstance(symbol, str) or len(symbol) > 32 or not _prices_ok(closes):
+        return None
+    if len(closes) < period + 1:
+        return None
+    if closes[-1] <= closes[-2]:
+        return None
+    if not below_lower_band(closes[:-1], period):
+        return None
+    if below_lower_band(closes, period):
+        return None
+    return Entry(symbol, 0, "bb_mr_reclaim")
 
 
 def research_entry(
@@ -99,12 +130,20 @@ def research_entry(
     volumes: list[int] | None = None,
     rsi_buy: int = 35,
 ) -> Entry | None:
-    """Dispatch RESEARCH_ENTRY mode. Returns Entry or None."""
-    del lows, rsi_buy  # unused for donchian; kept for call-site parity
-    if mode == "donchian_20":
+    del lows, rsi_buy
+    if mode in _LOOKBACK:
         if highs is None or volumes is None:
             return None
-        return donchian_entry(symbol, closes, highs, volumes, lookback=20)
+        return donchian_entry(
+            symbol,
+            closes,
+            highs,
+            volumes,
+            lookback=_LOOKBACK[mode],
+            min_volume_bps=_VOL_BPS[mode],
+        )
+    if mode == "bb_mr":
+        return bb_mean_reversion_entry(symbol, closes)
     return None
 
 
@@ -116,18 +155,24 @@ def research_fill_ok(
     highs: list[int] | None = None,
     lookback: int | None = None,
 ) -> bool:
-    """Next-open fill still above the broken Donchian level."""
-    del closes
     if isinstance(fill, bool) or not isinstance(fill, int) or fill <= 0 or fill >= 10**24:
         return False
-    if mode == "donchian_20":
-        lb = lookback if lookback is not None else 20
+    if mode in _LOOKBACK:
+        lb = lookback if lookback is not None else _LOOKBACK[mode]
         if highs is None:
             return False
         level = _max_high(highs, lb)
         if level is None:
             return False
         return fill > level
+    if mode == "bb_mr":
+        if not isinstance(closes, list) or len(closes) < 21:
+            return False
+        prior = closes[-2]
+        band = lower_band(closes)
+        if band is None or not _whole(prior) or prior <= 0:
+            return False
+        return fill > band and fill > prior
     return False
 
 
@@ -144,9 +189,9 @@ def research_entry_from_bars(
     *,
     rsi_buy: int = 35,
 ) -> ResearchBarEntry | None:
-    """Bar-path research entry. bars = (high, low, close, quote_vol)."""
     del rsi_buy
-    if not isinstance(bars, list) or len(bars) < 21:
+    min_bars = 56 if mode == "donchian_55" else 21
+    if not isinstance(bars, list) or len(bars) < min_bars:
         return None
     closes = [b[2] for b in bars]
     highs = [b[0] for b in bars]

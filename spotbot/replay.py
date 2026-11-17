@@ -24,6 +24,7 @@ class Fill:
     entry_micro: int
     exit_micro: int
     pnl_micro: int
+    reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,9 @@ class ReplayResult:
     fills: tuple[Fill, ...]
     open_micro: int = 0
     open_known: bool = True
+    stops: int = 0
+    trails: int = 0
+    takes: int = 0
 
 
 def holdout_cut(count: int) -> int:
@@ -81,9 +85,10 @@ def replay_closes(
 ) -> ReplayResult:
     research = research_mode()
     trail_mult = research_trail_atr_mult()
-    need_highs = research == "donchian_20" or trail_mult is not None
+    donchian = research is not None and research.startswith("donchian_")
+    need_highs = donchian or trail_mult is not None
     need_lows = trail_mult is not None
-    need_vol = research == "donchian_20"
+    need_vol = donchian
     if (
         not closes
         or closes[0] <= 0
@@ -156,7 +161,10 @@ def replay_closes(
     pos_take = take_bps
     pos_arm = trail_arm_bps
     pos_gap = trail_gap_bps
-    start = 40
+    stops = 0
+    trails = 0
+    takes = 0
+    start = 40 if not (research and research == "donchian_55") else 60
     i = start
     stamps: list[int] = []
     cooldown_until = 0
@@ -267,7 +275,13 @@ def replay_closes(
         trades += 1
         if pnl > 0:
             wins += 1
-        fills.append(Fill(entry, sold, pnl))
+        if reason == "stop":
+            stops += 1
+        elif reason == "trail":
+            trails += 1
+        elif reason == "take_profit":
+            takes += 1
+        fills.append(Fill(entry, sold, pnl, reason))
         stamps, cooldown_until, lock_until = _after_stop(
             reason, i, cooldown_bars, lookback_bars, lock_bars, lock_count, stamps, cooldown_until, lock_until
         )
@@ -278,7 +292,17 @@ def replay_closes(
     last = buckets[-1][-1] if buckets else (closes[-1] if closes else 0)
     mark, known = _open_mark(entry, peak, base, spent, last, taker_bps, slip_bps)
     return ReplayResult(
-        trades, wins, net, fees, ended_open=entry != 0, fills=tuple(fills), open_micro=mark, open_known=known
+        trades,
+        wins,
+        net,
+        fees,
+        ended_open=entry != 0,
+        fills=tuple(fills),
+        open_micro=mark,
+        open_known=known,
+        stops=stops,
+        trails=trails,
+        takes=takes,
     )
 
 
@@ -366,7 +390,10 @@ def replay_lift_bars(
     pos_take = take_bps
     pos_arm = trail_arm_bps
     pos_gap = trail_gap_bps
-    i = 14
+    stops = 0
+    trails = 0
+    takes = 0
+    i = 60 if research == "donchian_55" else 14
     stamps: list[int] = []
     cooldown_until = 0
     lock_until = 0
@@ -461,7 +488,13 @@ def replay_lift_bars(
         trades += 1
         if pnl > 0:
             wins += 1
-        fills.append(Fill(entry, sold, pnl))
+        if reason == "stop":
+            stops += 1
+        elif reason == "trail":
+            trails += 1
+        elif reason == "take_profit":
+            takes += 1
+        fills.append(Fill(entry, sold, pnl, reason))
         stamps, cooldown_until, lock_until = _after_stop(
             reason, i, cooldown_bars, lookback_bars, lock_bars, lock_count, stamps, cooldown_until, lock_until
         )
@@ -472,7 +505,17 @@ def replay_lift_bars(
     last = buckets[-1][-1] if buckets else (bars[-1][2] if bars else 0)
     mark, known = _open_mark(entry, peak, base, spent, last, taker_bps, slip_bps)
     return ReplayResult(
-        trades, wins, net, fees, ended_open=entry != 0, fills=tuple(fills), open_micro=mark, open_known=known
+        trades,
+        wins,
+        net,
+        fees,
+        ended_open=entry != 0,
+        fills=tuple(fills),
+        open_micro=mark,
+        open_known=known,
+        stops=stops,
+        trails=trails,
+        takes=takes,
     )
 
 
