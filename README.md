@@ -6,6 +6,8 @@
 
 **Research branches (не main / не unlock):** [`research/v2-holdout`](https://github.com/Gruver87/absolute-trading-bot-final/tree/research/v2-holdout) (A3 freeze, holdout NOT_READY until post-cut tape), [`research/trend-following`](https://github.com/Gruver87/absolute-trading-bot-final/tree/research/trend-following) (Donchian gate FAIL). Tag `v2-candidate-a3-freeze`.
 
+**Новичок?** → [`docs/START_HERE.md`](docs/START_HERE.md) — что можно запускать без риска и почему покупки выключены.
+
 Повтор без `--once` крутит цикл раз в `SPOT_INTERVAL_SEC` (по умолчанию 60 секунд).
 
 ## Решение
